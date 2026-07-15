@@ -1,0 +1,55 @@
+Enum transaction_type {
+  income
+  expense
+}
+
+//// TABLES ////
+Table account {
+  account_id uuid [pk, default: `gen_random_uuid()`] // Menggunakan UUID lebih aman
+  username varchar
+  password varchar [note: 'nullable if google login']
+  whatsapp_number varchar [unique, note: 'Krusial untuk mendeteksi user via bot WA']
+  created_at timestamp [default: `now()`]
+  updated_at timestamp
+}
+
+Table wallet {
+  wallet_id serial [pk]
+  account_id uuid [ref: > account.account_id]
+  name varchar
+  balance decimal [default: 0]
+  is_primary boolean [default: false]
+}
+
+Table category {
+  category_id serial [pk]
+  account_id uuid [ref: > account.account_id, note: 'Nullable jika ini kategori global/sistem']
+  name varchar
+  icon varchar [note: 'Untuk UI Flutter/Svelte (misal nama icon/hex color)']
+}
+
+Table budget {
+  budget_id serial [pk]
+  account_id uuid [ref: > account.account_id]
+  category_id integer [ref: > category.category_id]
+  name varchar
+  amount decimal
+  period varchar [note: 'Misal: YYYY-MM (2026-05) untuk budget bulanan']
+}
+
+Table transaction {
+  transaction_id serial [pk]
+  account_id uuid [ref: > account.account_id]
+  wallet_id integer [ref: > wallet.wallet_id]
+  category_id integer [ref: > category.category_id]
+  budget_id integer [note: 'nullable', ref: > budget.budget_id]
+  
+  type transaction_type
+  amount decimal
+  name varchar [note: 'Deskripsi transaksi']
+  is_ai_generated boolean [default: false, note: 'Menandai apakah ini hasil scan AI']
+  receipt_image_url varchar [note: 'Link URL ke foto struk/PDF mutasi']
+  report_date timestamp [note: 'Tanggal transaksi sebenarnya terjadi']
+  created_at timestamp [default: `now()`]
+  updated_at timestamp
+}
