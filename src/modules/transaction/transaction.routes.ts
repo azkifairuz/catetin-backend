@@ -1,55 +1,12 @@
 import { jwt } from "@elysiajs/jwt";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { Elysia, t } from "elysia";
-import { mkdir } from "node:fs/promises";
-import { extname, join } from "node:path";
 
 import { db } from "../../db";
 import { category, transaction, wallet } from "../../db/schema";
+import { authError, getAccountId, jwtSecret } from "../../lib/auth";
 import { errorResponse, successResponse } from "../../lib/api-response";
-
-const jwtSecret = Bun.env.JWT_SECRET;
-
-if (!jwtSecret) {
-  throw new Error("JWT_SECRET is required");
-}
-
-const authError = errorResponse("Unauthorized", {
-  code: "UNAUTHORIZED",
-});
-
-const receiptUploadDir = join(process.cwd(), "public", "uploads", "receipts");
-const receiptPublicPath = "/uploads/receipts";
-
-const saveReceiptImage = async (accountId: string, image?: File) => {
-  if (!image) return undefined;
-
-  await mkdir(receiptUploadDir, { recursive: true });
-
-  const extension = extname(image.name) || `.${image.type.split("/")[1]}`;
-  const filename = `${accountId}-${crypto.randomUUID()}${extension}`;
-  const filepath = join(receiptUploadDir, filename);
-
-  await Bun.write(filepath, image);
-
-  return `${receiptPublicPath}/${filename}`;
-};
-
-const getAccountId = async (
-  authorization: string | undefined,
-  jwtVerify: (token: string) => Promise<false | { sub?: string }>,
-) => {
-  const token = authorization?.startsWith("Bearer ")
-    ? authorization.slice("Bearer ".length)
-    : authorization;
-
-  if (!token) return null;
-
-  const payload = await jwtVerify(token);
-  if (!payload) return null;
-
-  return payload?.sub ?? null;
-};
+import { saveUploadedImage } from "../../lib/upload";
 
 const transactionBody = t.Object({
   type: t.Union([t.Literal("income"), t.Literal("expense")]),
@@ -130,7 +87,9 @@ export const transactionRoutes = new Elysia({ prefix: "/transactions" })
         );
       }
 
-      const receiptImageUrl = await saveReceiptImage(
+      const receiptImageUrl = await saveUploadedImage(
+        "receipts",
+        "receipts",
         accountId,
         body.receiptImage,
       );
