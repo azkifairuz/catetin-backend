@@ -1,5 +1,5 @@
 import { jwt } from "@elysiajs/jwt";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
 import { Elysia, t } from "elysia";
 
 import { db } from "../../db";
@@ -28,6 +28,20 @@ const transactionBody = t.Object({
 
 const aiGenerateBody = t.Object({
   text: t.String({ minLength: 1 }),
+});
+
+const aiSummaryBody = t.Object({
+  text: t.String({ minLength: 1 }),
+});
+
+const ocrReceiptBody = t.Object({
+  receiptImage: t.File({
+    type: "image",
+    maxSize: "5m",
+  }),
+  walletId: t.Optional(t.Number({ minimum: 1 })),
+  budgetId: t.Optional(t.Number({ minimum: 1 })),
+  reportDate: t.Optional(t.String()),
 });
 
 const transactionColumns = {
@@ -65,6 +79,25 @@ type GeminiTransactionOutput = {
   name: string;
   categoryName: string;
   reportDate?: string;
+};
+
+type GeminiDateRangeOutput = {
+  startDate: string;
+  endDate: string;
+};
+
+type SummaryTransaction = {
+  transactionId: number;
+  type: "income" | "expense" | null;
+  amount: string | null;
+  name: string | null;
+  reportDate: Date | null;
+  category: {
+    name: string | null;
+  } | null;
+  wallet: {
+    name: string | null;
+  } | null;
 };
 
 const getGeminiApiKey = () => Bun.env.GEMINI_API_KEY ?? Bun.env.GOOGLE_API_KEY;
@@ -121,7 +154,102 @@ const parseJsonFromText = (text: string) => {
   return JSON.parse(extractJsonObject(text)) as GeminiTransactionOutput;
 };
 
-const generateTransactionFromText = async (text: string) => {
+const toDateOnly = (date: Date) => date.toISOString().slice(0, 10);
+
+const startOfDay = (dateText: string) => {
+  const date = new Date(`${dateText}T00:00:00.000Z`);
+
+  if (Number.isNaN(date.getTime())) {
+    throw new Error("INVALID_DATE_RANGE");
+  }
+
+  return date;
+};
+
+const endOfDay = (dateText: string) => {
+  const date = new Date(`${dateText}T23:59:59.999Z`);
+
+  if (Number.isNaN(date.getTime())) {
+    throw new Error("INVALID_DATE_RANGE");
+  }
+
+  return date;
+};
+
+const getDateRangeDays = (startDate: Date, endDate: Date) => {
+  const oneDay = 24 * 60 * 60 * 1000;
+
+  return Math.floor((endDate.getTime() - startDate.getTime()) / oneDay) + 1;
+};
+
+const getDefaultSummaryRange = () => {
+  const now = new Date();
+  const startDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const endDate = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0),
+  );
+
+  return {
+    startDate: toDateOnly(startDate),
+    endDate: toDateOnly(endDate),
+  };
+};
+
+const normalizeDateRange = (range: GeminiDateRangeOutput) => {
+  const startDate = startOfDay(range.startDate);
+  const endDate = endOfDay(range.endDate);
+
+  if (startDate > endDate) {
+    throw new Error("INVALID_DATE_RANGE");
+  }
+
+  if (getDateRangeDays(startDate, endDate) > 366) {
+    throw new Error("SUMMARY_RANGE_TOO_LONG");
+  }
+
+  return {
+    startDate,
+    endDate,
+    startDateText: range.startDate,
+    endDateText: range.endDate,
+  };
+};
+
+const calculateSummaryStats = (transactions: SummaryTransaction[]) => {
+  const stats = transactions.reduce(
+    (result, item) => {
+      const amount = Number(item.amount ?? 0);
+
+      if (item.type === "income") {
+        result.totalIncome += amount;
+        return result;
+      }
+
+      if (item.type === "expense") {
+        result.totalExpense += amount;
+
+        const categoryName = item.category?.name ?? "Tanpa Kategori";
+        result.expenseByCategory[categoryName] =
+          (result.expenseByCategory[categoryName] ?? 0) + amount;
+      }
+
+      return result;
+    },
+    {
+      totalIncome: 0,
+      totalExpense: 0,
+      expenseByCategory: {} as Record<string, number>,
+    },
+  );
+
+  return {
+    ...stats,
+    netCashflow: stats.totalIncome - stats.totalExpense,
+    transactionCount: transactions.length,
+  };
+};
+
+export const generateTransactionFromText = async (text: string) => {
   const apiKey = getGeminiApiKey();
 
   if (!apiKey) {
@@ -200,7 +328,239 @@ const generateTransactionFromText = async (text: string) => {
   return parseJsonFromText(generatedText);
 };
 
-const createTransaction = async (input: CreateTransactionInput) => {
+export const generateDateRangeFromText = async (text: string) => {
+  const apiKey = getGeminiApiKey();
+
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY_NOT_FOUND");
+  }
+
+  const model = Bun.env.GEMINI_MODEL ?? "gemini-2.5-flash";
+  const today = toDateOnly(new Date());
+  const defaultRange = getDefaultSummaryRange();
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                text: [
+                  "Ekstrak rentang tanggal dari pertanyaan summary keuangan.",
+                  "Output hanya JSON valid tanpa markdown.",
+                  "Schema: {\"startDate\":\"YYYY-MM-DD\",\"endDate\":\"YYYY-MM-DD\"}.",
+                  `Tanggal hari ini: ${today}.`,
+                  `Jika pertanyaan tidak menyebut tanggal jelas, gunakan bulan berjalan: ${defaultRange.startDate} sampai ${defaultRange.endDate}.`,
+                  "Jika user menyebut satu tanggal, startDate dan endDate harus sama.",
+                  "Jika user menyebut bulan/tahun, gunakan awal sampai akhir bulan/tahun tersebut.",
+                  "Jangan buat rentang lebih dari 1 tahun.",
+                  `Pertanyaan: ${text}`,
+                ].join("\n"),
+              },
+            ],
+          },
+        ],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "object",
+            properties: {
+              startDate: {
+                type: "string",
+              },
+              endDate: {
+                type: "string",
+              },
+            },
+            required: ["startDate", "endDate"],
+          },
+          temperature: 0.1,
+        },
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error("GEMINI_GENERATE_FAILED");
+  }
+
+  const data = await response.json();
+  const generatedText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+  if (typeof generatedText !== "string") {
+    throw new Error("GEMINI_EMPTY_OUTPUT");
+  }
+
+  return JSON.parse(extractJsonObject(generatedText)) as GeminiDateRangeOutput;
+};
+
+export const generateFinancialSummary = async (
+  question: string,
+  range: GeminiDateRangeOutput,
+  transactions: SummaryTransaction[],
+) => {
+  const apiKey = getGeminiApiKey();
+
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY_NOT_FOUND");
+  }
+
+  const model = Bun.env.GEMINI_MODEL ?? "gemini-2.5-flash";
+  const stats = calculateSummaryStats(transactions);
+  const transactionData = transactions.map((item) => ({
+    id: item.transactionId,
+    type: item.type,
+    amount: Number(item.amount ?? 0),
+    name: item.name,
+    category: item.category?.name,
+    wallet: item.wallet?.name,
+    reportDate: item.reportDate ? toDateOnly(item.reportDate) : null,
+  }));
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                text: [
+                  "Buat summary keuangan personal dalam bahasa Indonesia yang singkat dan jelas.",
+                  "Jawab berdasarkan data transaksi saja, jangan mengarang.",
+                  "Sebutkan periode, total pemasukan, total pengeluaran, cashflow bersih, kategori pengeluaran terbesar, dan insight praktis.",
+                  "Jika tidak ada transaksi, bilang belum ada transaksi pada periode tersebut.",
+                  `Pertanyaan user: ${question}`,
+                  `Periode: ${range.startDate} sampai ${range.endDate}`,
+                  `Statistik: ${JSON.stringify(stats)}`,
+                  `Transaksi: ${JSON.stringify(transactionData)}`,
+                ].join("\n"),
+              },
+            ],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.2,
+        },
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error("GEMINI_GENERATE_FAILED");
+  }
+
+  const data = await response.json();
+  const generatedText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+  if (typeof generatedText !== "string") {
+    throw new Error("GEMINI_EMPTY_OUTPUT");
+  }
+
+  return {
+    summary: generatedText.trim(),
+    stats,
+  };
+};
+
+export const generateTransactionFromReceipt = async (image: File) => {
+  const apiKey = getGeminiApiKey();
+
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY_NOT_FOUND");
+  }
+
+  const model = Bun.env.GEMINI_MODEL ?? "gemini-2.5-flash";
+  const imageBuffer = await image.arrayBuffer();
+  const imageBase64 = Buffer.from(imageBuffer).toString("base64");
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                text: [
+                  "Baca gambar struk/receipt ini lalu ubah ke JSON transaksi.",
+                  "Output hanya JSON valid tanpa markdown.",
+                  "Schema: {\"type\":\"expense\",\"amount\":number,\"name\":\"string\",\"categoryName\":\"string\",\"reportDate\":\"YYYY-MM-DD optional\"}.",
+                  "Gunakan total akhir yang harus dibayar sebagai amount, bukan subtotal jika ada pajak/service.",
+                  "name berisi nama merchant atau ringkasan pembelian singkat.",
+                  "categoryName pilih kategori Indonesia singkat seperti Makanan, Minuman, Transportasi, Belanja, Kesehatan, Hiburan, atau Lainnya.",
+                  "Jika tanggal struk terlihat, isi reportDate dalam format YYYY-MM-DD.",
+                  "Jika nominal menggunakan format Indonesia seperti 20.000, ubah menjadi 20000.",
+                ].join("\n"),
+              },
+              {
+                inlineData: {
+                  mimeType: image.type,
+                  data: imageBase64,
+                },
+              },
+            ],
+          },
+        ],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "object",
+            properties: {
+              type: {
+                type: "string",
+                enum: ["expense"],
+              },
+              amount: {
+                type: "number",
+              },
+              name: {
+                type: "string",
+              },
+              categoryName: {
+                type: "string",
+              },
+              reportDate: {
+                type: "string",
+              },
+            },
+            required: ["type", "amount", "name", "categoryName"],
+          },
+          temperature: 0.1,
+        },
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error("GEMINI_GENERATE_FAILED");
+  }
+
+  const data = await response.json();
+  const generatedText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+  if (typeof generatedText !== "string") {
+    throw new Error("GEMINI_EMPTY_OUTPUT");
+  }
+
+  return parseJsonFromText(generatedText);
+};
+
+export const createTransaction = async (input: CreateTransactionInput) => {
   const amount = Number(input.amount);
 
   if (!Number.isFinite(amount) || amount <= 0) {
@@ -292,6 +652,60 @@ const createTransaction = async (input: CreateTransactionInput) => {
       wallet: updatedWallet,
     };
   });
+};
+
+export const generateFinancialSummaryFromQuestion = async (
+  accountId: string,
+  question: string,
+) => {
+  const generatedRange = await generateDateRangeFromText(question);
+  const normalizedRange = normalizeDateRange(generatedRange);
+  const transactions = await db.query.transaction.findMany({
+    where: and(
+      eq(transaction.accountId, accountId),
+      gte(transaction.reportDate, normalizedRange.startDate),
+      lte(transaction.reportDate, normalizedRange.endDate),
+    ),
+    orderBy: desc(transaction.reportDate),
+    with: {
+      category: {
+        columns: {
+          name: true,
+        },
+      },
+      wallet: {
+        columns: {
+          name: true,
+        },
+      },
+    },
+    columns: {
+      transactionId: true,
+      type: true,
+      amount: true,
+      name: true,
+      reportDate: true,
+    },
+  });
+  const generatedSummary = await generateFinancialSummary(
+    question,
+    {
+      startDate: normalizedRange.startDateText,
+      endDate: normalizedRange.endDateText,
+    },
+    transactions,
+  );
+
+  return {
+    question,
+    range: {
+      startDate: normalizedRange.startDateText,
+      endDate: normalizedRange.endDateText,
+    },
+    summary: generatedSummary.summary,
+    stats: generatedSummary.stats,
+    transactions,
+  };
 };
 
 export const transactionRoutes = new Elysia({ prefix: "/transactions" })
@@ -445,6 +859,115 @@ export const transactionRoutes = new Elysia({ prefix: "/transactions" })
       body: aiGenerateBody,
     },
   )
+  .post(
+    "/ai-summary",
+    async ({ body, headers, jwt, status }) => {
+      const accountId = await getAccountId(headers.authorization, jwt.verify);
+
+      if (!accountId) {
+        logApiEvent(401, "Unauthorized", {
+          module: "transaction",
+          action: "ai-summary",
+        });
+
+        return status(401, authError);
+      }
+
+      const generatedSummary = await generateFinancialSummaryFromQuestion(
+        accountId,
+        body.text,
+      );
+
+      logApiEvent(200, "Financial summary generated", {
+        accountId,
+        range: generatedSummary.range,
+        transactionCount: generatedSummary.transactions.length,
+      });
+
+      return successResponse("Financial summary generated", generatedSummary);
+    },
+    {
+      body: aiSummaryBody,
+    },
+  )
+  .post(
+    "/ocr-receipt",
+    async ({ body, headers, jwt, status }) => {
+      const accountId = await getAccountId(headers.authorization, jwt.verify);
+
+      if (!accountId) {
+        logApiEvent(401, "Unauthorized", {
+          module: "transaction",
+          action: "ocr-receipt",
+        });
+
+        return status(401, authError);
+      }
+
+      const receiptImageUrl = await saveUploadedImage(
+        "receipts",
+        "receipts",
+        accountId,
+        body.receiptImage,
+      );
+      const aiTransaction = await generateTransactionFromReceipt(
+        body.receiptImage,
+      );
+
+      if (
+        aiTransaction.type !== "expense" ||
+        !Number.isFinite(Number(aiTransaction.amount)) ||
+        Number(aiTransaction.amount) <= 0 ||
+        !aiTransaction.name ||
+        !aiTransaction.categoryName
+      ) {
+        logApiEvent(422, "OCR output is not a valid transaction", {
+          accountId,
+          output: aiTransaction,
+        });
+
+        return status(
+          422,
+          errorResponse("OCR output is not a valid transaction", {
+            code: "INVALID_OCR_OUTPUT",
+            output: aiTransaction,
+          }),
+        );
+      }
+
+      const result = await createTransaction({
+        accountId,
+        type: "expense",
+        amount: aiTransaction.amount.toString(),
+        name: aiTransaction.name,
+        categoryName: aiTransaction.categoryName,
+        walletId: body.walletId,
+        budgetId: body.budgetId,
+        isAiGenerated: true,
+        receiptImageUrl,
+        reportDate: body.reportDate ?? aiTransaction.reportDate,
+      });
+
+      logApiEvent(201, "Receipt OCR transaction created", {
+        accountId,
+        transactionId: result.transaction.transactionId,
+        walletId: result.wallet?.walletId,
+        categoryId: result.category.categoryId,
+        generated: aiTransaction,
+      });
+
+      return status(
+        201,
+        successResponse("Receipt OCR transaction created", {
+          generated: aiTransaction,
+          ...result,
+        }),
+      );
+    },
+    {
+      body: ocrReceiptBody,
+    },
+  )
   .onError(({ error, status }) => {
     if (!(error instanceof Error)) {
       throw error;
@@ -488,6 +1011,34 @@ export const transactionRoutes = new Elysia({ prefix: "/transactions" })
         400,
         errorResponse("Amount must be a positive number", {
           code: "INVALID_AMOUNT",
+        }),
+      );
+    }
+
+    if (error.message === "INVALID_DATE_RANGE") {
+      logApiEvent(400, "Invalid summary date range", {
+        module: "transaction",
+        error: error.message,
+      });
+
+      return status(
+        400,
+        errorResponse("Invalid summary date range", {
+          code: "INVALID_DATE_RANGE",
+        }),
+      );
+    }
+
+    if (error.message === "SUMMARY_RANGE_TOO_LONG") {
+      logApiEvent(400, "Summary date range is too long", {
+        module: "transaction",
+        error: error.message,
+      });
+
+      return status(
+        400,
+        errorResponse("Summary date range cannot be more than 1 year", {
+          code: "SUMMARY_RANGE_TOO_LONG",
         }),
       );
     }

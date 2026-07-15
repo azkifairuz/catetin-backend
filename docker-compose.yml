@@ -1,0 +1,22 @@
+services:
+  catetin:
+    build:
+      context: .
+    container_name: catetin
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3002
+      WA_AUTH_DIR: /app/storage/baileys-auth
+    ports:
+      - "3002:3002"
+    volumes:
+      - ./storage:/app/storage
+    networks:
+      - nginx_proxy
+
+networks:
+  nginx_proxy:
+    external: true
