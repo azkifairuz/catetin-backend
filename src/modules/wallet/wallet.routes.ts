@@ -6,6 +6,7 @@ import { db } from "../../db";
 import { wallet } from "../../db/schema";
 import { authError, getAccountId, jwtSecret } from "../../lib/auth";
 import { errorResponse, successResponse } from "../../lib/api-response";
+import { logApiEvent } from "../../lib/log-service";
 
 const createWalletBody = t.Object({
   name: t.String({ minLength: 1 }),
@@ -48,12 +49,22 @@ export const walletRoutes = new Elysia({ prefix: "/wallets" })
     const accountId = await getAccountId(headers.authorization, jwt.verify);
 
     if (!accountId) {
+      logApiEvent(401, "Unauthorized", {
+        module: "wallet",
+        action: "list",
+      });
+
       return status(401, authError);
     }
 
     const wallets = await db.query.wallet.findMany({
       where: eq(wallet.accountId, accountId),
       orderBy: desc(wallet.isPrimary),
+    });
+
+    logApiEvent(200, "Wallets fetched", {
+      accountId,
+      count: wallets.length,
     });
 
     return successResponse("Wallets fetched", wallets);
@@ -64,6 +75,12 @@ export const walletRoutes = new Elysia({ prefix: "/wallets" })
       const accountId = await getAccountId(headers.authorization, jwt.verify);
 
       if (!accountId) {
+        logApiEvent(401, "Unauthorized", {
+          module: "wallet",
+          action: "detail",
+          walletId: params.walletId,
+        });
+
         return status(401, authError);
       }
 
@@ -75,6 +92,11 @@ export const walletRoutes = new Elysia({ prefix: "/wallets" })
       });
 
       if (!existingWallet) {
+        logApiEvent(404, "Wallet not found", {
+          accountId,
+          walletId: params.walletId,
+        });
+
         return status(
           404,
           errorResponse("Wallet not found", {
@@ -82,6 +104,11 @@ export const walletRoutes = new Elysia({ prefix: "/wallets" })
           }),
         );
       }
+
+      logApiEvent(200, "Wallet fetched", {
+        accountId,
+        walletId: existingWallet.walletId,
+      });
 
       return successResponse("Wallet fetched", existingWallet);
     },
@@ -95,12 +122,22 @@ export const walletRoutes = new Elysia({ prefix: "/wallets" })
       const accountId = await getAccountId(headers.authorization, jwt.verify);
 
       if (!accountId) {
+        logApiEvent(401, "Unauthorized", {
+          module: "wallet",
+          action: "create",
+        });
+
         return status(401, authError);
       }
 
       const balance = body.balance ?? "0";
 
       if (!isPositiveOrZeroNumber(balance)) {
+        logApiEvent(400, "Balance must be a positive number or zero", {
+          accountId,
+          balance,
+        });
+
         return status(
           400,
           errorResponse("Balance must be a positive number or zero", {
@@ -138,6 +175,11 @@ export const walletRoutes = new Elysia({ prefix: "/wallets" })
         return newWallet;
       });
 
+      logApiEvent(201, "Wallet created", {
+        accountId,
+        walletId: createdWallet?.walletId,
+      });
+
       return status(201, successResponse("Wallet created", createdWallet));
     },
     {
@@ -150,10 +192,22 @@ export const walletRoutes = new Elysia({ prefix: "/wallets" })
       const accountId = await getAccountId(headers.authorization, jwt.verify);
 
       if (!accountId) {
+        logApiEvent(401, "Unauthorized", {
+          module: "wallet",
+          action: "update",
+          walletId: params.walletId,
+        });
+
         return status(401, authError);
       }
 
       if (body.balance && !isPositiveOrZeroNumber(body.balance)) {
+        logApiEvent(400, "Balance must be a positive number or zero", {
+          accountId,
+          walletId: params.walletId,
+          balance: body.balance,
+        });
+
         return status(
           400,
           errorResponse("Balance must be a positive number or zero", {
@@ -198,6 +252,11 @@ export const walletRoutes = new Elysia({ prefix: "/wallets" })
       });
 
       if (!updatedWallet) {
+        logApiEvent(404, "Wallet not found", {
+          accountId,
+          walletId: params.walletId,
+        });
+
         return status(
           404,
           errorResponse("Wallet not found", {
@@ -205,6 +264,11 @@ export const walletRoutes = new Elysia({ prefix: "/wallets" })
           }),
         );
       }
+
+      logApiEvent(200, "Wallet updated", {
+        accountId,
+        walletId: updatedWallet.walletId,
+      });
 
       return successResponse("Wallet updated", updatedWallet);
     },
@@ -219,6 +283,12 @@ export const walletRoutes = new Elysia({ prefix: "/wallets" })
       const accountId = await getAccountId(headers.authorization, jwt.verify);
 
       if (!accountId) {
+        logApiEvent(401, "Unauthorized", {
+          module: "wallet",
+          action: "delete",
+          walletId: params.walletId,
+        });
+
         return status(401, authError);
       }
 
@@ -233,6 +303,11 @@ export const walletRoutes = new Elysia({ prefix: "/wallets" })
         .returning(walletColumns);
 
       if (!deletedWallet) {
+        logApiEvent(404, "Wallet not found", {
+          accountId,
+          walletId: params.walletId,
+        });
+
         return status(
           404,
           errorResponse("Wallet not found", {
@@ -240,6 +315,11 @@ export const walletRoutes = new Elysia({ prefix: "/wallets" })
           }),
         );
       }
+
+      logApiEvent(200, "Wallet deleted", {
+        accountId,
+        walletId: deletedWallet.walletId,
+      });
 
       return successResponse("Wallet deleted", deletedWallet);
     },

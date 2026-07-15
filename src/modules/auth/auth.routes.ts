@@ -5,6 +5,7 @@ import { Elysia, t } from "elysia";
 import { db } from "../../db";
 import { account, wallet } from "../../db/schema";
 import { errorResponse, successResponse } from "../../lib/api-response";
+import { logApiEvent } from "../../lib/log-service";
 
 const jwtSecret = Bun.env.JWT_SECRET;
 
@@ -42,6 +43,10 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       });
 
       if (existingAccount) {
+        logApiEvent(409, "WhatsApp number already registered", {
+          whatsappNumber: body.whatsappNumber,
+        });
+
         return status(
           409,
           errorResponse("WhatsApp number already registered", {
@@ -91,6 +96,11 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
         };
       });
 
+      logApiEvent(201, "Account registered", {
+        accountId: result.account.accountId,
+        walletId: result.wallet.walletId,
+      });
+
       return status(201, successResponse("Account registered", result));
     },
     {
@@ -105,6 +115,10 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       });
 
       if (!existingAccount?.password) {
+        logApiEvent(401, "Invalid credentials", {
+          whatsappNumber: body.whatsappNumber,
+        });
+
         return status(
           401,
           errorResponse("Invalid credentials", {
@@ -119,6 +133,11 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       );
 
       if (!isPasswordValid) {
+        logApiEvent(401, "Invalid credentials", {
+          accountId: existingAccount.accountId,
+          whatsappNumber: existingAccount.whatsappNumber,
+        });
+
         return status(
           401,
           errorResponse("Invalid credentials", {
@@ -130,6 +149,11 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       const token = await jwt.sign({
         sub: existingAccount.accountId,
         whatsappNumber: existingAccount.whatsappNumber ?? undefined,
+      });
+
+      logApiEvent(200, "Login successful", {
+        accountId: existingAccount.accountId,
+        whatsappNumber: existingAccount.whatsappNumber,
       });
 
       return successResponse("Login successful", {

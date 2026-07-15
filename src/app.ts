@@ -2,6 +2,7 @@ import { Elysia } from "elysia";
 
 import { authRoutes } from "./modules/auth/auth.routes";
 import { categoryRoutes } from "./modules/category/category.routes";
+import { logRoutes } from "./modules/log/log.routes";
 import { transactionRoutes } from "./modules/transaction/transaction.routes";
 import { walletRoutes } from "./modules/wallet/wallet.routes";
 
@@ -10,6 +11,7 @@ export const app = new Elysia()
   .use(categoryRoutes)
   .use(transactionRoutes)
   .use(walletRoutes)
+  .use(logRoutes)
   .get("/uploads/categories/:filename", ({ params: { filename }, status }) => {
     const file = Bun.file(`public/uploads/categories/${filename}`);
 
