@@ -25,6 +25,9 @@ const reconnectDelayMs = Number(Bun.env.WA_RECONNECT_DELAY_MS ?? 5000);
 let isStartingWhatsappService = false;
 let reconnectTimer: Timer | null = null;
 let currentSocket: ReturnType<typeof makeWASocket> | null = null;
+let currentQr: string | null = null;
+
+export const getWhatsappQr = () => currentQr;
 
 const createProcessLogger = (
   remoteJid: string,
@@ -470,13 +473,18 @@ export const startWhatsappService = async () => {
   socket.ev.on("creds.update", saveCreds);
   socket.ev.on("connection.update", async (update) => {
     if (update.qr) {
-      qrcode.generate(update.qr, { small: true });
+      currentQr = update.qr;
+      if (Bun.env.WA_PRINT_TERMINAL_QR === "true") {
+        qrcode.generate(update.qr, { small: true });
+      }
       logApiEvent(200, "WhatsApp QR generated", {
         module: "whatsapp",
+        qrUrl: "/whatsapp/qr.svg",
       });
     }
 
     if (update.connection === "open") {
+      currentQr = null;
       logApiEvent(200, "WhatsApp connected", {
         module: "whatsapp",
       });

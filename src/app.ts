@@ -8,6 +8,7 @@ import { dashboardRoutes } from "./modules/dashboard/dashboard.routes";
 import { logRoutes } from "./modules/log/log.routes";
 import { transactionRoutes } from "./modules/transaction/transaction.routes";
 import { walletRoutes } from "./modules/wallet/wallet.routes";
+import { whatsappRoutes } from "./modules/whatsapp/whatsapp.routes";
 
 export const app = new Elysia()
   .use(authRoutes)
@@ -15,6 +16,7 @@ export const app = new Elysia()
   .use(dashboardRoutes)
   .use(transactionRoutes)
   .use(walletRoutes)
+  .use(whatsappRoutes)
   .use(logRoutes)
   .get("/uploads/categories/:filename", ({ params: { filename }, status }) => {
     const file = Bun.file(`public/uploads/categories/${filename}`);
