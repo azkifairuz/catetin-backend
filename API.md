@@ -60,6 +60,82 @@ Response `200`:
 }
 ```
 
+## Dashboard
+
+### GET `/dashboard`
+
+Returns dashboard summary for the authenticated account. Defaults to the current month.
+
+Query params:
+
+```text
+startDate=2026-07-01
+endDate=2026-07-31
+limit=5
+```
+
+Response `200`:
+
+```json
+{
+  "success": true,
+  "message": "Dashboard fetched",
+  "data": {
+    "range": {
+      "startDate": "2026-07-01",
+      "endDate": "2026-07-31"
+    },
+    "summary": {
+      "totalBalance": 1500000,
+      "totalIncome": 3000000,
+      "totalExpense": 1200000,
+      "netCashflow": 1800000,
+      "transactionCount": 12,
+      "walletCount": 2
+    },
+    "wallets": [
+      {
+        "walletId": 1,
+        "name": "Main Wallet",
+        "balance": "1500000",
+        "isPrimary": true
+      }
+    ],
+    "walletActivities": [
+      {
+        "walletId": 1,
+        "name": "Main Wallet",
+        "income": 3000000,
+        "expense": 1200000,
+        "transactionCount": 12
+      }
+    ],
+    "topExpenseCategories": [
+      {
+        "categoryId": 1,
+        "name": "Makanan",
+        "icon": null,
+        "total": 500000,
+        "transactionCount": 5,
+        "percentage": 41.67
+      }
+    ],
+    "recentTransactions": [
+      {
+        "transactionId": 1,
+        "type": "expense",
+        "amount": "25000",
+        "name": "Kopi",
+        "reportDate": "2026-07-16T00:00:00.000Z",
+        "category": {},
+        "wallet": {}
+      }
+    ]
+  },
+  "error": null
+}
+```
+
 ## Auth
 
 ### POST `/auth/register`
