@@ -101,6 +101,17 @@ type SummaryTransaction = {
   } | null;
 };
 
+export type FinancialSummaryResult = {
+  question: string;
+  range: {
+    startDate: string;
+    endDate: string;
+  };
+  summary: string;
+  stats: ReturnType<typeof calculateSummaryStats>;
+  transactions: SummaryTransaction[];
+};
+
 const getGeminiApiKey = () => Bun.env.GEMINI_API_KEY ?? Bun.env.GOOGLE_API_KEY;
 
 const extractJsonObject = (text: string) => {
@@ -658,7 +669,7 @@ export const createTransaction = async (input: CreateTransactionInput) => {
 export const generateFinancialSummaryFromQuestion = async (
   accountId: string,
   question: string,
-) => {
+): Promise<FinancialSummaryResult> => {
   const generatedRange = await generateDateRangeFromText(question);
   const normalizedRange = normalizeDateRange(generatedRange);
   const transactions = await db.query.transaction.findMany({

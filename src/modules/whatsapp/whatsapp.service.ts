@@ -17,6 +17,7 @@ import {
   generateTransactionFromReceipt,
   generateTransactionFromText,
 } from "../transaction/transaction.routes";
+import { renderFinancialSummaryImage } from "./summary-image";
 
 const logger = pino({ level: Bun.env.WA_LOG_LEVEL ?? "silent" });
 const authDirectory = Bun.env.WA_AUTH_DIR ?? "storage/baileys-auth";
@@ -26,6 +27,19 @@ let isStartingWhatsappService = false;
 let reconnectTimer: Timer | null = null;
 let currentSocket: ReturnType<typeof makeWASocket> | null = null;
 let currentQr: string | null = null;
+
+type WhatsappTextReply = {
+  type: "text";
+  text: string;
+};
+
+type WhatsappImageReply = {
+  type: "image";
+  image: Buffer;
+  caption?: string;
+};
+
+type WhatsappReply = WhatsappTextReply | WhatsappImageReply;
 
 export const getWhatsappQr = () => currentQr;
 
@@ -285,7 +299,7 @@ const handleTextMessage = async (
   accountId: string,
   text: string,
   logProcess = createProcessLogger("unknown"),
-) => {
+): Promise<WhatsappReply> => {
   if (isSummaryQuestion(text)) {
     logProcess(102, "WhatsApp AI summary started", {
       intent: "summary",
@@ -298,7 +312,24 @@ const handleTextMessage = async (
       intent: "summary",
     });
 
-    return summary.summary;
+    logProcess(102, "WhatsApp summary image render started", {
+      intent: "summary",
+      range: summary.range,
+      transactionCount: summary.transactions.length,
+    });
+
+    const image = await renderFinancialSummaryImage(summary);
+
+    logProcess(200, "WhatsApp summary image render finished", {
+      intent: "summary",
+      imageSize: image.length,
+    });
+
+    return {
+      type: "image",
+      image,
+      caption: summary.summary,
+    };
   }
 
   if (isTransactionText(text)) {
@@ -335,13 +366,16 @@ const handleTextMessage = async (
       categoryId: result.category.categoryId,
     });
 
-    return [
-      "Transaksi sudah dicatat.",
-      `Nama: ${result.transaction.name}`,
-      `Tipe: ${result.transaction.type}`,
-      `Nominal: Rp${Number(result.transaction.amount ?? 0).toLocaleString("id-ID")}`,
-      `Kategori: ${result.category.name}`,
-    ].join("\n");
+    return {
+      type: "text",
+      text: [
+        "Transaksi sudah dicatat.",
+        `Nama: ${result.transaction.name}`,
+        `Tipe: ${result.transaction.type}`,
+        `Nominal: Rp${Number(result.transaction.amount ?? 0).toLocaleString("id-ID")}`,
+        `Kategori: ${result.category.name}`,
+      ].join("\n"),
+    };
   }
 
   logProcess(102, "WhatsApp financial chat AI started", {
@@ -355,7 +389,10 @@ const handleTextMessage = async (
     intent: "financial-chat",
   });
 
-  return reply;
+  return {
+    type: "text",
+    text: reply,
+  };
 };
 
 const handleReceiptFile = async (
@@ -582,7 +619,7 @@ export const startWhatsappService = async () => {
           continue;
         }
 
-        let reply: string;
+        let reply: WhatsappReply;
 
         await socket.sendMessage(remoteJid, {
           text: "Pesanmu sudah diterima, lagi aku proses ya.",
@@ -619,12 +656,15 @@ export const startWhatsappService = async () => {
             "receipt.jpg",
           );
 
-          reply = await handleReceiptFile(
-            userAccount.accountId,
-            file,
-            false,
-            logProcess,
-          );
+          reply = {
+            type: "text",
+            text: await handleReceiptFile(
+              userAccount.accountId,
+              file,
+              false,
+              logProcess,
+            ),
+          };
         } else if (message.documentMessage) {
           logProcess(102, "WhatsApp document download started", {
             accountId: userAccount.accountId,
@@ -653,12 +693,15 @@ export const startWhatsappService = async () => {
           const file = createFileFromMessage(buffer, mimeType, filename);
 
           if (mimeType.startsWith("image/") || mimeType === "application/pdf") {
-            reply = await handleReceiptFile(
-              userAccount.accountId,
-              file,
-              true,
-              logProcess,
-            );
+            reply = {
+              type: "text",
+              text: await handleReceiptFile(
+                userAccount.accountId,
+                file,
+                true,
+                logProcess,
+              ),
+            };
           } else if (mimeType.startsWith("text/")) {
             reply = await handleTextMessage(
               userAccount.accountId,
@@ -671,8 +714,10 @@ export const startWhatsappService = async () => {
               mimeType,
             });
 
-            reply =
-              "Dokumen diterima, tapi saat ini hanya struk gambar, PDF, atau dokumen teks yang bisa diproses.";
+            reply = {
+              type: "text",
+              text: "Dokumen diterima, tapi saat ini hanya struk gambar, PDF, atau dokumen teks yang bisa diproses.",
+            };
           }
         } else if (text) {
           logProcess(102, "WhatsApp text intent routing started", {
@@ -691,17 +736,26 @@ export const startWhatsappService = async () => {
             accountId: userAccount.accountId,
           });
 
-          reply =
-            "Aku bisa bantu catat transaksi dari chat, baca struk dari gambar/dokumen, atau bikin laporan keuangan.";
+          reply = {
+            type: "text",
+            text: "Aku bisa bantu catat transaksi dari chat, baca struk dari gambar/dokumen, atau bikin laporan keuangan.",
+          };
         }
 
         logProcess(102, "WhatsApp final response sending", {
           accountId: userAccount.accountId,
         });
 
-        await socket.sendMessage(remoteJid, {
-          text: reply,
-        });
+        if (reply.type === "image") {
+          await socket.sendMessage(remoteJid, {
+            image: reply.image,
+            caption: reply.caption,
+          });
+        } else {
+          await socket.sendMessage(remoteJid, {
+            text: reply.text,
+          });
+        }
 
         logProcess(200, "WhatsApp final response sent", {
           accountId: userAccount.accountId,
