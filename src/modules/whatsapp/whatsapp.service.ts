@@ -22,10 +22,22 @@ import {
   isBalanceQuestion,
 } from "./whatsapp-balance";
 import { renderFinancialSummaryImage } from "./summary-image";
+import { UnregisteredReplyLimiter } from "./unregistered-reply-limiter";
 
 const logger = pino({ level: Bun.env.WA_LOG_LEVEL ?? "silent" });
 const authDirectory = Bun.env.WA_AUTH_DIR ?? "storage/baileys-auth";
 const reconnectDelayMs = Number(Bun.env.WA_RECONNECT_DELAY_MS ?? 5000);
+const configuredUnregisteredReplyLimit = Number(
+  Bun.env.WA_UNREGISTERED_REPLY_LIMIT ?? 3,
+);
+const unregisteredReplyLimit =
+  Number.isInteger(configuredUnregisteredReplyLimit) &&
+  configuredUnregisteredReplyLimit > 0
+    ? configuredUnregisteredReplyLimit
+    : 3;
+const unregisteredReplyLimiter = new UnregisteredReplyLimiter(
+  unregisteredReplyLimit,
+);
 
 let isStartingWhatsappService = false;
 let reconnectTimer: Timer | null = null;
@@ -621,7 +633,25 @@ export const startWhatsappService = async () => {
       if (!userAccount) {
         logProcess(102, "WhatsApp unregistered user detected");
 
+        const isRegisterCommand = parseRegisterCommand(text) !== null;
+        const replyLimit = isRegisterCommand
+          ? null
+          : unregisteredReplyLimiter.claim(remoteJid);
+
+        if (replyLimit && !replyLimit.allowed) {
+          logProcess(429, "WhatsApp unregistered reply suppressed", {
+            replyCount: replyLimit.replyCount,
+            maxReplies: replyLimit.maxReplies,
+          });
+
+          continue;
+        }
+
         const registerResult = await registerWhatsappAccount(remoteJid, text);
+
+        if (registerResult?.ok) {
+          unregisteredReplyLimiter.clear(remoteJid);
+        }
 
         await socket.sendMessage(remoteJid, {
           text: registerResult?.message ?? getRegisterInstruction(),
@@ -632,6 +662,8 @@ export const startWhatsappService = async () => {
           "WhatsApp registration flow replied",
           {
             registered: registerResult?.ok ?? false,
+            replyCount: replyLimit?.replyCount,
+            maxReplies: replyLimit?.maxReplies,
           },
         );
 
@@ -657,9 +689,9 @@ export const startWhatsappService = async () => {
 
         let reply: WhatsappReply;
 
-        await socket.sendMessage(remoteJid, {
-          text: "Pesanmu sudah diterima, lagi aku proses ya.",
-        });
+        // await socket.sendMessage(remoteJid, {
+        //   text: "Pesanmu sudah diterima, lagi aku proses ya.",
+        // });
 
         logProcess(102, "WhatsApp processing acknowledgement sent", {
           accountId: userAccount.accountId,
