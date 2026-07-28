@@ -3,7 +3,7 @@ import makeWASocket, {
   downloadMediaMessage,
   useMultiFileAuthState,
 } from "@whiskeysockets/baileys";
-import { inArray } from "drizzle-orm";
+import { desc, eq, inArray } from "drizzle-orm";
 import pino from "pino";
 import qrcode from "qrcode-terminal";
 
@@ -17,6 +17,10 @@ import {
   generateTransactionFromReceipt,
   generateTransactionFromText,
 } from "../transaction/transaction.routes";
+import {
+  formatBalanceReply,
+  isBalanceQuestion,
+} from "./whatsapp-balance";
 import { renderFinancialSummaryImage } from "./summary-image";
 
 const logger = pino({ level: Bun.env.WA_LOG_LEVEL ?? "silent" });
@@ -300,6 +304,38 @@ const handleTextMessage = async (
   text: string,
   logProcess = createProcessLogger("unknown"),
 ): Promise<WhatsappReply> => {
+  if (isBalanceQuestion(text)) {
+    logProcess(102, "WhatsApp balance lookup started", {
+      intent: "balance",
+      text,
+    });
+
+    const wallets = await db.query.wallet.findMany({
+      where: eq(wallet.accountId, accountId),
+      orderBy: desc(wallet.isPrimary),
+      columns: {
+        name: true,
+        balance: true,
+        isPrimary: true,
+      },
+    });
+    const totalBalance = wallets.reduce(
+      (total, item) => total + Number(item.balance ?? 0),
+      0,
+    );
+
+    logProcess(200, "WhatsApp balance lookup finished", {
+      intent: "balance",
+      walletCount: wallets.length,
+      totalBalance,
+    });
+
+    return {
+      type: "text",
+      text: formatBalanceReply(wallets),
+    };
+  }
+
   if (isSummaryQuestion(text)) {
     logProcess(102, "WhatsApp AI summary started", {
       intent: "summary",
@@ -722,6 +758,7 @@ export const startWhatsappService = async () => {
         } else if (text) {
           logProcess(102, "WhatsApp text intent routing started", {
             accountId: userAccount.accountId,
+            isBalance: isBalanceQuestion(text),
             isSummary: isSummaryQuestion(text),
             isTransaction: isTransactionText(text),
           });
