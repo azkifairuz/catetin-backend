@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@elysiajs/jwt": "^1.4.2",
-    "@whiskeysockets/baileys": "^7.0.0-rc13",
+    "@whiskeysockets/baileys": "^7.0.0-rc14",
     "drizzle-orm": "^0.45.2",
     "elysia": "latest",
     "pino": "^10.3.1",
