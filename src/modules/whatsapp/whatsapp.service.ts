@@ -12,10 +12,14 @@ import { account, wallet } from "../../db/schema";
 import { logApiEvent } from "../../lib/log-service";
 import { saveUploadedImage } from "../../lib/upload";
 import {
-  createTransaction,
+  getWhatsappNumberCandidates,
+  normalizeWhatsappNumber,
+} from "../../lib/whatsapp-number";
+import {
+  createReceiptTransactions,
+  createTransactionsFromText,
   generateFinancialSummaryFromQuestion,
-  generateTransactionFromReceipt,
-  generateTransactionFromText,
+  generateTransactionsFromReceipt,
 } from "../transaction/transaction.routes";
 import {
   formatBalanceReply,
@@ -23,6 +27,9 @@ import {
 } from "./whatsapp-balance";
 import { renderFinancialSummaryImage } from "./summary-image";
 import { UnregisteredReplyLimiter } from "./unregistered-reply-limiter";
+import { resolveWhatsappIdentityJid } from "./whatsapp-identity";
+import { formatReceiptBatchReply } from "./whatsapp-receipt-reply";
+import { formatTransactionBatchReply } from "./whatsapp-transaction-reply";
 
 const logger = pino({ level: Bun.env.WA_LOG_LEVEL ?? "silent" });
 const authDirectory = Bun.env.WA_AUTH_DIR ?? "storage/baileys-auth";
@@ -76,14 +83,8 @@ const createProcessLogger = (
   };
 };
 
-const normalizeWhatsappNumber = (jid: string) => {
-  return jid.split("@")[0]?.replace(/\D/g, "") ?? "";
-};
-
 const getPrimaryWhatsappNumber = (remoteJid: string) => {
-  const whatsappNumber = normalizeWhatsappNumber(remoteJid);
-
-  return whatsappNumber ? `+${whatsappNumber}` : "";
+  return normalizeWhatsappNumber(remoteJid) ?? "";
 };
 
 const getTextFromMessage = (message: any) => {
@@ -110,20 +111,23 @@ const getWhatsappAccount = async (remoteJid: string) => {
 
   if (!whatsappNumber) return null;
 
-  const numberCandidates = [
-    whatsappNumber,
-    `+${whatsappNumber}`,
-    whatsappNumber.startsWith("62") ? `0${whatsappNumber.slice(2)}` : "",
-  ].filter(Boolean);
-
-  return db.query.account.findFirst({
-    where: inArray(account.whatsappNumber, numberCandidates),
+  const accounts = await db.query.account.findMany({
+    where: inArray(
+      account.whatsappNumber,
+      getWhatsappNumberCandidates(whatsappNumber),
+    ),
     columns: {
       accountId: true,
       whatsappNumber: true,
       username: true,
     },
   });
+
+  return (
+    accounts.find((item) => item.whatsappNumber === whatsappNumber) ??
+    accounts[0] ??
+    null
+  );
 };
 
 const parseRegisterCommand = (text: string) => {
@@ -386,43 +390,34 @@ const handleTextMessage = async (
       text,
     });
 
-    const generated = await generateTransactionFromText(text);
+    const batch = await createTransactionsFromText(accountId, text);
 
     logProcess(200, "WhatsApp AI transaction extraction finished", {
       intent: "transaction",
-      generated,
+      generated: batch.generated,
+      counts: batch.counts,
     });
 
-    logProcess(102, "WhatsApp transaction insert started", {
-      intent: "transaction",
-    });
+    if (batch.results.length === 0 && batch.firstCreateError) {
+      throw batch.firstCreateError;
+    }
 
-    const result = await createTransaction({
-      accountId,
-      type: generated.type,
-      amount: generated.amount.toString(),
-      name: generated.name,
-      categoryName: generated.categoryName,
-      isAiGenerated: true,
-      reportDate: generated.reportDate,
-    });
-
-    logProcess(201, "WhatsApp transaction insert finished", {
-      intent: "transaction",
-      transactionId: result.transaction.transactionId,
-      walletId: result.wallet?.walletId,
-      categoryId: result.category.categoryId,
-    });
+    logProcess(
+      batch.results.length > 0 ? 201 : 422,
+      "WhatsApp transaction batch finished",
+      {
+        intent: "transaction",
+        counts: batch.counts,
+        transactionIds: batch.results.map(
+          (item) => item.transaction.transactionId,
+        ),
+        failed: batch.failed,
+      },
+    );
 
     return {
       type: "text",
-      text: [
-        "Transaksi sudah dicatat.",
-        `Nama: ${result.transaction.name}`,
-        `Tipe: ${result.transaction.type}`,
-        `Nominal: Rp${Number(result.transaction.amount ?? 0).toLocaleString("id-ID")}`,
-        `Kategori: ${result.category.name}`,
-      ].join("\n"),
+      text: formatTransactionBatchReply(batch.results, batch.failed),
     };
   }
 
@@ -471,53 +466,53 @@ const handleReceiptFile = async (
     intent: "receipt",
   });
 
-  const generated = await generateTransactionFromReceipt(file);
+  const generated = await generateTransactionsFromReceipt(file);
 
   logProcess(200, "WhatsApp receipt OCR finished", {
     intent: "receipt",
     generated,
   });
 
-  if (
-    generated.type !== "expense" ||
-    !Number.isFinite(Number(generated.amount)) ||
-    Number(generated.amount) <= 0 ||
-    !generated.name ||
-    !generated.categoryName
-  ) {
-    return isDocument
-      ? "Dokumen berhasil diterima, tapi belum bisa dibaca sebagai transaksi struk."
-      : "Gambar berhasil diterima, tapi belum bisa dibaca sebagai struk transaksi.";
-  }
-
   logProcess(102, "WhatsApp receipt transaction insert started", {
     intent: "receipt",
   });
 
-  const result = await createTransaction({
+  const result = await createReceiptTransactions({
     accountId,
-    type: "expense",
-    amount: generated.amount.toString(),
-    name: generated.name,
-    categoryName: generated.categoryName,
-    isAiGenerated: true,
+    receipt: generated,
     receiptImageUrl,
-    reportDate: generated.reportDate,
   });
 
-  logProcess(201, "WhatsApp receipt transaction insert finished", {
+  if (result.error || !result.reconciliation || result.results.length === 0) {
+    logProcess(422, "WhatsApp receipt has no valid items", {
+      intent: "receipt",
+      error: result.error,
+      failed: result.failed,
+    });
+
+    return isDocument
+      ? "Dokumen berhasil diterima, tapi tidak ada item struk valid yang bisa dicatat."
+      : "Gambar berhasil diterima, tapi tidak ada item struk valid yang bisa dicatat.";
+  }
+
+  logProcess(201, "WhatsApp receipt transactions inserted", {
     intent: "receipt",
-    transactionId: result.transaction.transactionId,
+    receiptId: result.receiptId,
+    transactionIds: result.results.map(
+      (item) => item.transaction.transactionId,
+    ),
     walletId: result.wallet?.walletId,
-    categoryId: result.category.categoryId,
+    counts: result.counts,
+    reconciliation: result.reconciliation,
+    failed: result.failed,
   });
 
-  return [
-    "Struk sudah dibaca dan transaksi dicatat.",
-    `Nama: ${result.transaction.name}`,
-    `Nominal: Rp${Number(result.transaction.amount ?? 0).toLocaleString("id-ID")}`,
-    `Kategori: ${result.category.name}`,
-  ].join("\n");
+  return formatReceiptBatchReply({
+    merchant: result.merchant,
+    results: result.results,
+    failed: result.failed,
+    receiptTotal: result.reconciliation.receiptTotal,
+  });
 };
 
 const createFileFromMessage = (
@@ -628,7 +623,35 @@ export const startWhatsappService = async () => {
 
       logProcess(102, "WhatsApp message received");
 
-      const userAccount = await getWhatsappAccount(remoteJid);
+      let identityJid: string | null = null;
+
+      try {
+        identityJid = await resolveWhatsappIdentityJid(
+          item.key,
+          socket.signalRepository.lidMapping.getPNForLID.bind(
+            socket.signalRepository.lidMapping,
+          ),
+        );
+      } catch (error) {
+        logProcess(500, "WhatsApp identity resolution failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+
+      if (!identityJid || !normalizeWhatsappNumber(identityJid)) {
+        logProcess(422, "WhatsApp sender phone number is unavailable", {
+          remoteJidAlt: item.key.remoteJidAlt,
+          participant: item.key.participant,
+          participantAlt: item.key.participantAlt,
+        });
+
+        await socket.sendMessage(remoteJid, {
+          text: "Nomor WhatsApp kamu belum dapat dikenali. Silakan kirim ulang pesan beberapa saat lagi.",
+        });
+        continue;
+      }
+
+      const userAccount = await getWhatsappAccount(identityJid);
 
       if (!userAccount) {
         logProcess(102, "WhatsApp unregistered user detected");
@@ -636,7 +659,7 @@ export const startWhatsappService = async () => {
         const isRegisterCommand = parseRegisterCommand(text) !== null;
         const replyLimit = isRegisterCommand
           ? null
-          : unregisteredReplyLimiter.claim(remoteJid);
+          : unregisteredReplyLimiter.claim(identityJid);
 
         if (replyLimit && !replyLimit.allowed) {
           logProcess(429, "WhatsApp unregistered reply suppressed", {
@@ -647,10 +670,10 @@ export const startWhatsappService = async () => {
           continue;
         }
 
-        const registerResult = await registerWhatsappAccount(remoteJid, text);
+        const registerResult = await registerWhatsappAccount(identityJid, text);
 
         if (registerResult?.ok) {
-          unregisteredReplyLimiter.clear(remoteJid);
+          unregisteredReplyLimiter.clear(identityJid);
         }
 
         await socket.sendMessage(remoteJid, {

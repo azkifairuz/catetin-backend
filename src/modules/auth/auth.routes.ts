@@ -1,11 +1,15 @@
 import { jwt } from "@elysiajs/jwt";
-import { eq } from "drizzle-orm";
+import { inArray } from "drizzle-orm";
 import { Elysia, t } from "elysia";
 
 import { db } from "../../db";
 import { account, wallet } from "../../db/schema";
 import { errorResponse, successResponse } from "../../lib/api-response";
 import { logApiEvent } from "../../lib/log-service";
+import {
+  getWhatsappNumberCandidates,
+  normalizeWhatsappNumber,
+} from "../../lib/whatsapp-number";
 
 const jwtSecret = Bun.env.JWT_SECRET;
 
@@ -37,14 +41,34 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
   .post(
     "/register",
     async ({ body, status }) => {
-      const existingAccount = await db.query.account.findFirst({
-        where: eq(account.whatsappNumber, body.whatsappNumber),
-        columns: { accountId: true },
+      const normalizedWhatsappNumber = normalizeWhatsappNumber(
+        body.whatsappNumber,
+      );
+
+      if (!normalizedWhatsappNumber) {
+        return status(
+          400,
+          errorResponse("Invalid WhatsApp number", {
+            code: "INVALID_WHATSAPP_NUMBER",
+          }),
+        );
+      }
+
+      const existingAccounts = await db.query.account.findMany({
+        where: inArray(
+          account.whatsappNumber,
+          getWhatsappNumberCandidates(normalizedWhatsappNumber),
+        ),
+        columns: { accountId: true, whatsappNumber: true },
       });
+      const existingAccount =
+        existingAccounts.find(
+          (item) => item.whatsappNumber === normalizedWhatsappNumber,
+        ) ?? existingAccounts[0];
 
       if (existingAccount) {
         logApiEvent(409, "WhatsApp number already registered", {
-          whatsappNumber: body.whatsappNumber,
+          whatsappNumber: normalizedWhatsappNumber,
         });
 
         return status(
@@ -62,7 +86,7 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
           .insert(account)
           .values({
             username: body.username,
-            whatsappNumber: body.whatsappNumber,
+            whatsappNumber: normalizedWhatsappNumber,
             password: passwordHash,
           })
           .returning(publicAccountColumns);
@@ -110,13 +134,33 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
   .post(
     "/login",
     async ({ body, jwt, status }) => {
-      const existingAccount = await db.query.account.findFirst({
-        where: eq(account.whatsappNumber, body.whatsappNumber),
+      const normalizedWhatsappNumber = normalizeWhatsappNumber(
+        body.whatsappNumber,
+      );
+
+      if (!normalizedWhatsappNumber) {
+        return status(
+          400,
+          errorResponse("Invalid WhatsApp number", {
+            code: "INVALID_WHATSAPP_NUMBER",
+          }),
+        );
+      }
+
+      const existingAccounts = await db.query.account.findMany({
+        where: inArray(
+          account.whatsappNumber,
+          getWhatsappNumberCandidates(normalizedWhatsappNumber),
+        ),
       });
+      const existingAccount =
+        existingAccounts.find(
+          (item) => item.whatsappNumber === normalizedWhatsappNumber,
+        ) ?? existingAccounts[0];
 
       if (!existingAccount?.password) {
         logApiEvent(401, "Invalid credentials", {
-          whatsappNumber: body.whatsappNumber,
+          whatsappNumber: normalizedWhatsappNumber,
         });
 
         return status(

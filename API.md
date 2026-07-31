@@ -138,6 +138,11 @@ Response `200`:
 
 ## Auth
 
+WhatsApp numbers are normalized before lookup and storage. Indonesian inputs
+such as `081234567890`, `81234567890`, and `6281234567890` are stored in the
+canonical `+6281234567890` format. Login accepts the canonical and legacy
+formats.
+
 ### POST `/auth/register`
 
 Create account and primary wallet.
@@ -624,13 +629,14 @@ Response `201`:
 
 ### POST `/transactions/ai-generate`
 
-Generate and create transaction from natural text.
+Generate and create up to 10 transactions from natural text. Valid items are
+stored even when another item is invalid.
 
 Request `application/json`:
 
 ```json
 {
-  "text": "aku abis beli kopi 20.000"
+  "text": "aku abis beli kopi 25.000 terus makan soto 20.000"
 }
 ```
 
@@ -639,23 +645,50 @@ Response `201`:
 ```json
 {
   "success": true,
-  "message": "Transaction generated",
+  "message": "Transactions generated",
   "data": {
-    "input": "aku abis beli kopi 20.000",
-    "generated": {
-      "type": "expense",
-      "amount": 20000,
-      "name": "Kopi",
-      "categoryName": "Minuman",
-      "reportDate": "2026-07-16"
-    },
-    "transaction": {},
-    "category": {},
-    "wallet": {}
+    "input": "aku abis beli kopi 25.000 terus makan soto 20.000",
+    "results": [
+      {
+        "index": 0,
+        "generated": {
+          "type": "expense",
+          "amount": 25000,
+          "name": "Kopi",
+          "categoryName": "Minuman"
+        },
+        "transaction": {},
+        "category": {},
+        "wallet": {}
+      },
+      {
+        "index": 1,
+        "generated": {
+          "type": "expense",
+          "amount": 20000,
+          "name": "Soto",
+          "categoryName": "Makanan"
+        },
+        "transaction": {},
+        "category": {},
+        "wallet": {}
+      }
+    ],
+    "failed": [],
+    "counts": {
+      "detected": 2,
+      "created": 2,
+      "adjustments": 0,
+      "failed": 0
+    }
   },
   "error": null
 }
 ```
+
+For a single successful transaction, the legacy `generated`, `transaction`,
+`category`, and `wallet` fields are also included. A partial result returns
+`201`; if no item is valid, the endpoint returns `422`.
 
 ### POST `/transactions/ai-summary`
 
@@ -699,7 +732,10 @@ Response `200`:
 
 ### POST `/transactions/ocr-receipt`
 
-Read receipt image/document and create expense transaction.
+Read a receipt image/document and create one expense transaction per item.
+All rows from the same receipt share a `receiptId`. Tax and fees are positive
+expense rows; discounts are negative expense rows. At most 50 item rows are
+processed from one receipt.
 
 Request `multipart/form-data`:
 
@@ -725,22 +761,69 @@ Response `201`:
 ```json
 {
   "success": true,
-  "message": "Receipt OCR transaction created",
+  "message": "Receipt OCR transactions created",
   "data": {
     "generated": {
-      "type": "expense",
-      "amount": 45000,
-      "name": "Kedai Kopi",
-      "categoryName": "Minuman",
-      "reportDate": "2026-07-16"
+      "merchant": "Indomaret",
+      "totalAmount": 45000,
+      "reportDate": "2026-07-16",
+      "items": [
+        {
+          "name": "Rokok",
+          "quantity": 1,
+          "unitPrice": 25000,
+          "amount": 25000,
+          "categoryName": "Rokok"
+        },
+        {
+          "name": "Roti",
+          "quantity": 2,
+          "unitPrice": 10000,
+          "amount": 20000,
+          "categoryName": "Makanan"
+        }
+      ],
+      "adjustments": []
     },
-    "transaction": {},
-    "category": {},
+    "receiptId": "0efead3b-27b3-4fe3-9d21-b6d60b722ba8",
+    "merchant": "Indomaret",
+    "results": [
+      {
+        "line": {
+          "name": "Rokok",
+          "amount": 25000,
+          "categoryName": "Rokok",
+          "lineType": "item",
+          "quantity": 1,
+          "unitPrice": 25000
+        },
+        "transaction": {},
+        "category": {}
+      }
+    ],
+    "failed": [],
+    "counts": {
+      "detected": 2,
+      "created": 2,
+      "failed": 0
+    },
+    "reconciliation": {
+      "receiptTotal": 45000,
+      "itemTotal": 45000,
+      "adjustmentTotal": 0,
+      "recordedTotal": 45000
+    },
     "wallet": {}
   },
   "error": null
 }
 ```
+
+Each created transaction includes `receiptId`, `receiptMerchant`,
+`receiptLineType`, `quantity`, and `unitPrice`. Invalid items are reported in
+`failed`; valid items are still saved and the reconciliation row keeps the
+recorded total equal to the receipt total. If no item is valid, the endpoint
+returns `422` without changing the wallet.
 
 Transaction errors:
 
@@ -928,6 +1011,7 @@ Scan QR code shown in terminal.
 Supported WhatsApp messages:
 
 - Text transaction: `aku beli kopi 20.000`
+- Multiple text transactions: `aku beli kopi 25k terus makan soto 20k`
 - Receipt image: image message
 - Receipt document: image/PDF document
 - Text document

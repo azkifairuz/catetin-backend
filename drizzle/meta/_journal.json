@@ -8,6 +8,13 @@
       "when": 1784061791854,
       "tag": "0000_special_mentor",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1785522499731,
+      "tag": "0001_flippant_kree",
+      "breakpoints": true
     }
   ]
 }

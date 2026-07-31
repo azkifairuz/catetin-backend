@@ -56,6 +56,11 @@ const transactionColumns = {
   name: transaction.name,
   isAiGenerated: transaction.isAiGenerated,
   receiptImageUrl: transaction.receiptImageUrl,
+  receiptId: transaction.receiptId,
+  receiptMerchant: transaction.receiptMerchant,
+  receiptLineType: transaction.receiptLineType,
+  quantity: transaction.quantity,
+  unitPrice: transaction.unitPrice,
   reportDate: transaction.reportDate,
   createdAt: transaction.createdAt,
   updatedAt: transaction.updatedAt,
@@ -71,15 +76,61 @@ type CreateTransactionInput = {
   budgetId?: number;
   isAiGenerated?: boolean;
   receiptImageUrl?: string;
+  receiptId?: string;
+  receiptMerchant?: string;
+  receiptLineType?: string;
+  quantity?: string;
+  unitPrice?: string;
   reportDate?: string;
 };
 
-type GeminiTransactionOutput = {
+export type GeminiTransactionOutput = {
   type: "income" | "expense";
   amount: number;
   name: string;
   categoryName: string;
   reportDate?: string;
+};
+
+export const MAX_RECEIPT_ITEMS = 50;
+
+export type ReceiptLineType =
+  | "item"
+  | "tax"
+  | "fee"
+  | "discount"
+  | "adjustment";
+
+export type GeminiReceiptItem = {
+  name: string;
+  quantity: number;
+  unitPrice: number;
+  amount: number;
+  categoryName: string;
+};
+
+export type GeminiReceiptAdjustment = {
+  name: string;
+  amount: number;
+  categoryName: string;
+  lineType: Exclude<ReceiptLineType, "item">;
+};
+
+export type GeminiReceiptOutput = {
+  merchant: string;
+  totalAmount: number;
+  reportDate?: string;
+  items: unknown[];
+  adjustments?: unknown[];
+};
+
+export const MAX_AI_TRANSACTIONS = 10;
+
+export type AiTransactionFailure = {
+  index: number;
+  generated: unknown;
+  code: "INVALID_AI_OUTPUT" | "BATCH_LIMIT_EXCEEDED" | "CREATE_FAILED";
+  message: string;
 };
 
 type GeminiDateRangeOutput = {
@@ -162,8 +213,56 @@ const extractJsonObject = (text: string) => {
   throw new SyntaxError("JSON object is incomplete");
 };
 
-const parseJsonFromText = (text: string) => {
-  return JSON.parse(extractJsonObject(text)) as GeminiTransactionOutput;
+export const parseTransactionsFromTextOutput = (text: string): unknown[] => {
+  const trimmedText = text
+    .trim()
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/\s*```$/i, "");
+  const parsed = JSON.parse(trimmedText) as unknown;
+
+  // Keep accepting the old single-object shape during deployment transitions.
+  return Array.isArray(parsed) ? parsed : [parsed];
+};
+
+export const getGeneratedTransactionValidationError = (value: unknown) => {
+  if (!value || typeof value !== "object") {
+    return "Format transaksi harus berupa object.";
+  }
+
+  const candidate = value as Partial<GeminiTransactionOutput>;
+
+  if (!candidate.type || !["income", "expense"].includes(candidate.type)) {
+    return "Tipe transaksi harus income atau expense.";
+  }
+
+  if (
+    !Number.isFinite(Number(candidate.amount)) ||
+    Number(candidate.amount) <= 0
+  ) {
+    return "Nominal transaksi harus lebih dari 0.";
+  }
+
+  if (typeof candidate.name !== "string" || !candidate.name.trim()) {
+    return "Nama transaksi wajib diisi.";
+  }
+
+  if (
+    typeof candidate.categoryName !== "string" ||
+    !candidate.categoryName.trim()
+  ) {
+    return "Kategori transaksi wajib diisi.";
+  }
+
+  if (
+    candidate.reportDate !== undefined &&
+    (typeof candidate.reportDate !== "string" ||
+      Number.isNaN(new Date(candidate.reportDate).getTime()))
+  ) {
+    return "Tanggal transaksi tidak valid.";
+  }
+
+  return null;
 };
 
 const toDateOnly = (date: Date) => date.toISOString().slice(0, 10);
@@ -261,7 +360,7 @@ const calculateSummaryStats = (transactions: SummaryTransaction[]) => {
   };
 };
 
-export const generateTransactionFromText = async (text: string) => {
+export const generateTransactionsFromText = async (text: string) => {
   const apiKey = getGeminiApiKey();
 
   if (!apiKey) {
@@ -283,9 +382,10 @@ export const generateTransactionFromText = async (text: string) => {
             parts: [
               {
                 text: [
-                  "Ubah teks catatan ke JSON transaksi.",
+                  "Ubah teks catatan menjadi array JSON transaksi.",
                   "Output hanya JSON valid tanpa markdown.",
-                  "Schema: {\"type\":\"income|expense\",\"amount\":number,\"name\":\"string\",\"categoryName\":\"string\",\"reportDate\":\"YYYY-MM-DD optional\"}.",
+                  "Pisahkan setiap pembelian, pembayaran, pemasukan, atau nominal berbeda menjadi transaksi tersendiri sesuai urutan teks.",
+                  "Schema: [{\"type\":\"income|expense\",\"amount\":number,\"name\":\"string\",\"categoryName\":\"string\",\"reportDate\":\"YYYY-MM-DD optional\"}].",
                   "Gunakan bahasa Indonesia singkat untuk name dan categoryName.",
                   "Jika teks berisi pengeluaran seperti beli, bayar, jajan, makan, transport, gunakan type expense.",
                   "Jika teks berisi pemasukan seperti gaji, bonus, terima uang, gunakan type income.",
@@ -299,26 +399,29 @@ export const generateTransactionFromText = async (text: string) => {
         generationConfig: {
           responseMimeType: "application/json",
           responseSchema: {
-            type: "object",
-            properties: {
-              type: {
-                type: "string",
-                enum: ["income", "expense"],
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                type: {
+                  type: "string",
+                  enum: ["income", "expense"],
+                },
+                amount: {
+                  type: "number",
+                },
+                name: {
+                  type: "string",
+                },
+                categoryName: {
+                  type: "string",
+                },
+                reportDate: {
+                  type: "string",
+                },
               },
-              amount: {
-                type: "number",
-              },
-              name: {
-                type: "string",
-              },
-              categoryName: {
-                type: "string",
-              },
-              reportDate: {
-                type: "string",
-              },
+              required: ["type", "amount", "name", "categoryName"],
             },
-            required: ["type", "amount", "name", "categoryName"],
           },
           temperature: 0.1,
         },
@@ -337,7 +440,7 @@ export const generateTransactionFromText = async (text: string) => {
     throw new Error("GEMINI_EMPTY_OUTPUT");
   }
 
-  return parseJsonFromText(generatedText);
+  return parseTransactionsFromTextOutput(generatedText);
 };
 
 export const generateDateRangeFromText = async (text: string) => {
@@ -485,7 +588,7 @@ export const generateFinancialSummary = async (
   };
 };
 
-export const generateTransactionFromReceipt = async (image: File) => {
+export const generateTransactionsFromReceipt = async (image: File) => {
   const apiKey = getGeminiApiKey();
 
   if (!apiKey) {
@@ -509,12 +612,15 @@ export const generateTransactionFromReceipt = async (image: File) => {
             parts: [
               {
                 text: [
-                  "Baca gambar struk/receipt ini lalu ubah ke JSON transaksi.",
+                  "Baca seluruh detail gambar struk/receipt ini ke JSON terstruktur.",
                   "Output hanya JSON valid tanpa markdown.",
-                  "Schema: {\"type\":\"expense\",\"amount\":number,\"name\":\"string\",\"categoryName\":\"string\",\"reportDate\":\"YYYY-MM-DD optional\"}.",
-                  "Gunakan total akhir yang harus dibayar sebagai amount, bukan subtotal jika ada pajak/service.",
-                  "name berisi nama merchant atau ringkasan pembelian singkat.",
-                  "categoryName pilih kategori Indonesia singkat seperti Makanan, Minuman, Transportasi, Belanja, Kesehatan, Hiburan, atau Lainnya.",
+                  "Pisahkan setiap baris barang menjadi item tersendiri sesuai urutan struk, maksimal 50 item.",
+                  "Untuk item, amount adalah total baris setelah diskon khusus item; quantity dan unitPrice harus berupa angka.",
+                  "Pisahkan pajak, biaya layanan, diskon keseluruhan, dan pembulatan ke adjustments.",
+                  "Adjustment pajak/biaya bernilai positif dan diskon bernilai negatif.",
+                  "lineType adjustment harus tax, fee, discount, atau adjustment.",
+                  "totalAmount adalah total akhir yang benar-benar dibayar.",
+                  "categoryName pilih kategori Indonesia singkat seperti Makanan, Minuman, Rokok, Transportasi, Belanja, Kesehatan, Hiburan, atau Lainnya.",
                   "Jika tanggal struk terlihat, isi reportDate dalam format YYYY-MM-DD.",
                   "Jika nominal menggunakan format Indonesia seperti 20.000, ubah menjadi 20000.",
                 ].join("\n"),
@@ -533,24 +639,53 @@ export const generateTransactionFromReceipt = async (image: File) => {
           responseSchema: {
             type: "object",
             properties: {
-              type: {
+              merchant: {
                 type: "string",
-                enum: ["expense"],
               },
-              amount: {
+              totalAmount: {
                 type: "number",
-              },
-              name: {
-                type: "string",
-              },
-              categoryName: {
-                type: "string",
               },
               reportDate: {
                 type: "string",
               },
+              items: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    name: { type: "string" },
+                    quantity: { type: "number" },
+                    unitPrice: { type: "number" },
+                    amount: { type: "number" },
+                    categoryName: { type: "string" },
+                  },
+                  required: [
+                    "name",
+                    "quantity",
+                    "unitPrice",
+                    "amount",
+                    "categoryName",
+                  ],
+                },
+              },
+              adjustments: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    name: { type: "string" },
+                    amount: { type: "number" },
+                    categoryName: { type: "string" },
+                    lineType: {
+                      type: "string",
+                      enum: ["tax", "fee", "discount", "adjustment"],
+                    },
+                  },
+                  required: ["name", "amount", "categoryName", "lineType"],
+                },
+              },
             },
-            required: ["type", "amount", "name", "categoryName"],
+            required: ["merchant", "totalAmount", "items", "adjustments"],
           },
           temperature: 0.1,
         },
@@ -569,7 +704,7 @@ export const generateTransactionFromReceipt = async (image: File) => {
     throw new Error("GEMINI_EMPTY_OUTPUT");
   }
 
-  return parseJsonFromText(generatedText);
+  return JSON.parse(extractJsonObject(generatedText)) as GeminiReceiptOutput;
 };
 
 export const createTransaction = async (input: CreateTransactionInput) => {
@@ -635,6 +770,11 @@ export const createTransaction = async (input: CreateTransactionInput) => {
         name: input.name,
         isAiGenerated: input.isAiGenerated ?? false,
         receiptImageUrl: input.receiptImageUrl,
+        receiptId: input.receiptId,
+        receiptMerchant: input.receiptMerchant,
+        receiptLineType: input.receiptLineType,
+        quantity: input.quantity,
+        unitPrice: input.unitPrice,
         reportDate: input.reportDate ? new Date(input.reportDate) : new Date(),
       })
       .returning(transactionColumns);
@@ -664,6 +804,438 @@ export const createTransaction = async (input: CreateTransactionInput) => {
       wallet: updatedWallet,
     };
   });
+};
+
+export type ReceiptItemFailure = {
+  source: "item" | "adjustment";
+  index: number;
+  generated: unknown;
+  code: "INVALID_RECEIPT_ITEM" | "RECEIPT_ITEM_LIMIT_EXCEEDED";
+  message: string;
+};
+
+type PreparedReceiptLine = {
+  name: string;
+  amount: number;
+  categoryName: string;
+  lineType: ReceiptLineType;
+  quantity?: number;
+  unitPrice?: number;
+};
+
+const roundMoney = (value: number) => Math.round(value * 100) / 100;
+
+export const prepareReceiptLines = (receipt: GeminiReceiptOutput) => {
+  const totalAmount = Number(receipt.totalAmount);
+  const merchant =
+    typeof receipt.merchant === "string" ? receipt.merchant.trim() : "";
+
+  if (!merchant || !Number.isFinite(totalAmount) || totalAmount <= 0) {
+    return {
+      lines: [] as PreparedReceiptLine[],
+      failed: [] as ReceiptItemFailure[],
+      error: "Merchant dan total akhir struk harus valid.",
+      reconciliation: null,
+    };
+  }
+
+  const lines: PreparedReceiptLine[] = [];
+  const failed: ReceiptItemFailure[] = [];
+
+  for (const [index, rawItem] of (receipt.items ?? []).entries()) {
+    if (index >= MAX_RECEIPT_ITEMS) {
+      failed.push({
+        source: "item",
+        index,
+        generated: rawItem,
+        code: "RECEIPT_ITEM_LIMIT_EXCEEDED",
+        message: `Maksimal ${MAX_RECEIPT_ITEMS} item per struk.`,
+      });
+      continue;
+    }
+
+    const item = rawItem as Partial<GeminiReceiptItem>;
+    const quantity = Number(item?.quantity);
+    const unitPrice = Number(item?.unitPrice);
+    const amount = Number(item?.amount);
+
+    if (
+      !item ||
+      typeof item.name !== "string" ||
+      !item.name.trim() ||
+      typeof item.categoryName !== "string" ||
+      !item.categoryName.trim() ||
+      !Number.isFinite(quantity) ||
+      quantity <= 0 ||
+      !Number.isFinite(unitPrice) ||
+      unitPrice < 0 ||
+      !Number.isFinite(amount) ||
+      amount <= 0
+    ) {
+      failed.push({
+        source: "item",
+        index,
+        generated: rawItem,
+        code: "INVALID_RECEIPT_ITEM",
+        message: "Nama, kategori, quantity, unit price, atau total item tidak valid.",
+      });
+      continue;
+    }
+
+    lines.push({
+      name: item.name.trim(),
+      amount: roundMoney(amount),
+      categoryName: item.categoryName.trim(),
+      lineType: "item",
+      quantity,
+      unitPrice: roundMoney(unitPrice),
+    });
+  }
+
+  const validItemCount = lines.length;
+
+  for (const [index, rawAdjustment] of (
+    receipt.adjustments ?? []
+  ).entries()) {
+    const adjustment = rawAdjustment as Partial<GeminiReceiptAdjustment>;
+    const rawAmount = Number(adjustment?.amount);
+    const validLineTypes: ReceiptLineType[] = [
+      "tax",
+      "fee",
+      "discount",
+      "adjustment",
+    ];
+
+    if (
+      !adjustment ||
+      typeof adjustment.name !== "string" ||
+      !adjustment.name.trim() ||
+      typeof adjustment.categoryName !== "string" ||
+      !adjustment.categoryName.trim() ||
+      !adjustment.lineType ||
+      !validLineTypes.includes(adjustment.lineType) ||
+      !Number.isFinite(rawAmount) ||
+      rawAmount === 0
+    ) {
+      failed.push({
+        source: "adjustment",
+        index,
+        generated: rawAdjustment,
+        code: "INVALID_RECEIPT_ITEM",
+        message: "Penyesuaian struk tidak valid.",
+      });
+      continue;
+    }
+
+    const amount =
+      adjustment.lineType === "discount"
+        ? -Math.abs(rawAmount)
+        : Math.abs(rawAmount);
+
+    lines.push({
+      name: adjustment.name.trim(),
+      amount: roundMoney(amount),
+      categoryName: adjustment.categoryName.trim(),
+      lineType: adjustment.lineType,
+    });
+  }
+
+  if (validItemCount === 0) {
+    return {
+      lines: [] as PreparedReceiptLine[],
+      failed,
+      error: "Tidak ada item struk yang valid.",
+      reconciliation: null,
+    };
+  }
+
+  const extractedTotal = roundMoney(
+    lines.reduce((sum, line) => sum + line.amount, 0),
+  );
+  const difference = roundMoney(totalAmount - extractedTotal);
+
+  if (difference !== 0) {
+    lines.push({
+      name:
+        difference < 0
+          ? "Diskon/Penyesuaian struk"
+          : "Penyesuaian struk",
+      amount: difference,
+      categoryName: difference < 0 ? "Diskon" : "Lainnya",
+      lineType: difference < 0 ? "discount" : "adjustment",
+    });
+  }
+
+  const itemTotal = roundMoney(
+    lines
+      .filter((line) => line.lineType === "item")
+      .reduce((sum, line) => sum + line.amount, 0),
+  );
+  const adjustmentTotal = roundMoney(
+    lines
+      .filter((line) => line.lineType !== "item")
+      .reduce((sum, line) => sum + line.amount, 0),
+  );
+
+  return {
+    lines,
+    failed,
+    error: null,
+    reconciliation: {
+      receiptTotal: roundMoney(totalAmount),
+      itemTotal,
+      adjustmentTotal,
+      recordedTotal: roundMoney(itemTotal + adjustmentTotal),
+    },
+  };
+};
+
+type CreateReceiptTransactionsInput = {
+  accountId: string;
+  receipt: GeminiReceiptOutput;
+  receiptImageUrl?: string;
+  walletId?: number;
+  budgetId?: number;
+  reportDate?: string;
+};
+
+export const createReceiptTransactions = async (
+  input: CreateReceiptTransactionsInput,
+) => {
+  const prepared = prepareReceiptLines(input.receipt);
+
+  if (prepared.error || !prepared.reconciliation) {
+    return {
+      receiptId: null,
+      merchant: input.receipt.merchant,
+      results: [],
+      failed: prepared.failed,
+      counts: {
+        detected: input.receipt.items?.length ?? 0,
+        created: 0,
+        adjustments: 0,
+        failed: prepared.failed.length,
+      },
+      reconciliation: null,
+      error: prepared.error,
+      wallet: null,
+    };
+  }
+
+  const receiptId = crypto.randomUUID();
+  const reportDate = input.reportDate ?? input.receipt.reportDate;
+
+  return db.transaction(async (tx) => {
+    const selectedWallet = input.walletId
+      ? await tx.query.wallet.findFirst({
+          where: and(
+            eq(wallet.walletId, input.walletId),
+            eq(wallet.accountId, input.accountId),
+          ),
+        })
+      : await tx.query.wallet.findFirst({
+          where: and(
+            eq(wallet.accountId, input.accountId),
+            eq(wallet.isPrimary, true),
+          ),
+        });
+
+    if (!selectedWallet) {
+      throw new Error(
+        input.walletId ? "WALLET_NOT_FOUND" : "PRIMARY_WALLET_NOT_FOUND",
+      );
+    }
+
+    const categoryCache = new Map<string, typeof category.$inferSelect>();
+    const results: Array<{
+      line: PreparedReceiptLine;
+      transaction: typeof transaction.$inferSelect;
+      category: typeof category.$inferSelect;
+    }> = [];
+
+    for (const line of prepared.lines) {
+      let selectedCategory = categoryCache.get(line.categoryName);
+
+      if (!selectedCategory) {
+        selectedCategory = await tx.query.category.findFirst({
+          where: and(
+            eq(category.accountId, input.accountId),
+            eq(category.name, line.categoryName),
+          ),
+        });
+      }
+
+      if (!selectedCategory) {
+        [selectedCategory] = await tx
+          .insert(category)
+          .values({
+            accountId: input.accountId,
+            name: line.categoryName,
+          })
+          .returning();
+      }
+
+      if (!selectedCategory) {
+        throw new Error("CATEGORY_CREATE_FAILED");
+      }
+
+      categoryCache.set(line.categoryName, selectedCategory);
+
+      const [createdTransaction] = await tx
+        .insert(transaction)
+        .values({
+          accountId: input.accountId,
+          walletId: selectedWallet.walletId,
+          categoryId: selectedCategory.categoryId,
+          budgetId: input.budgetId,
+          type: "expense",
+          amount: line.amount.toString(),
+          name: line.name,
+          isAiGenerated: true,
+          receiptImageUrl: input.receiptImageUrl,
+          receiptId,
+          receiptMerchant: input.receipt.merchant.trim(),
+          receiptLineType: line.lineType,
+          quantity: line.quantity?.toString(),
+          unitPrice: line.unitPrice?.toString(),
+          reportDate: reportDate ? new Date(reportDate) : new Date(),
+        })
+        .returning();
+
+      if (!createdTransaction) {
+        throw new Error("TRANSACTION_CREATE_FAILED");
+      }
+
+      results.push({
+        line,
+        transaction: createdTransaction,
+        category: selectedCategory,
+      });
+    }
+
+    const [updatedWallet] = await tx
+      .update(wallet)
+      .set({
+        balance: sql`${wallet.balance} - ${prepared.reconciliation.recordedTotal}`,
+      })
+      .where(eq(wallet.walletId, selectedWallet.walletId))
+      .returning({
+        walletId: wallet.walletId,
+        name: wallet.name,
+        balance: wallet.balance,
+        isPrimary: wallet.isPrimary,
+      });
+
+    return {
+      receiptId,
+      merchant: input.receipt.merchant.trim(),
+      results,
+      failed: prepared.failed,
+      counts: {
+        detected: input.receipt.items.length,
+        created: results.filter((item) => item.line.lineType === "item").length,
+        adjustments: results.filter(
+          (item) => item.line.lineType !== "item",
+        ).length,
+        failed: prepared.failed.length,
+      },
+      reconciliation: prepared.reconciliation,
+      error: null,
+      wallet: updatedWallet ?? null,
+    };
+  });
+};
+
+export const createGeneratedTransactions = async (
+  accountId: string,
+  generatedItems: unknown[],
+  create: typeof createTransaction = createTransaction,
+) => {
+  const results: Array<{
+    index: number;
+    generated: GeminiTransactionOutput;
+    transaction: Awaited<ReturnType<typeof createTransaction>>["transaction"];
+    category: Awaited<ReturnType<typeof createTransaction>>["category"];
+    wallet: Awaited<ReturnType<typeof createTransaction>>["wallet"];
+  }> = [];
+  const failed: AiTransactionFailure[] = [];
+  let firstCreateError: unknown;
+
+  for (const [index, generated] of generatedItems.entries()) {
+    if (index >= MAX_AI_TRANSACTIONS) {
+      failed.push({
+        index,
+        generated,
+        code: "BATCH_LIMIT_EXCEEDED",
+        message: `Maksimal ${MAX_AI_TRANSACTIONS} transaksi per pesan.`,
+      });
+      continue;
+    }
+
+    const validationError = getGeneratedTransactionValidationError(generated);
+
+    if (validationError) {
+      failed.push({
+        index,
+        generated,
+        code: "INVALID_AI_OUTPUT",
+        message: validationError,
+      });
+      continue;
+    }
+
+    const transactionData = generated as GeminiTransactionOutput;
+
+    try {
+      const created = await create({
+        accountId,
+        type: transactionData.type,
+        amount: transactionData.amount.toString(),
+        name: transactionData.name.trim(),
+        categoryName: transactionData.categoryName.trim(),
+        isAiGenerated: true,
+        reportDate: transactionData.reportDate,
+      });
+
+      results.push({
+        index,
+        generated: transactionData,
+        ...created,
+      });
+    } catch (error) {
+      firstCreateError ??= error;
+      failed.push({
+        index,
+        generated,
+        code: "CREATE_FAILED",
+        message: "Transaksi gagal disimpan.",
+      });
+    }
+  }
+
+  return {
+    results,
+    failed,
+    counts: {
+      detected: generatedItems.length,
+      created: results.length,
+      failed: failed.length,
+    },
+    firstCreateError,
+  };
+};
+
+export const createTransactionsFromText = async (
+  accountId: string,
+  text: string,
+) => {
+  const generated = await generateTransactionsFromText(text);
+  const batch = await createGeneratedTransactions(accountId, generated);
+
+  return {
+    generated,
+    ...batch,
+  };
 };
 
 export const generateFinancialSummaryFromQuestion = async (
@@ -817,54 +1389,66 @@ export const transactionRoutes = new Elysia({ prefix: "/transactions" })
         return status(401, authError);
       }
 
-      const aiTransaction = await generateTransactionFromText(body.text);
+      const batch = await createTransactionsFromText(accountId, body.text);
 
-      if (
-        !["income", "expense"].includes(aiTransaction.type) ||
-        !Number.isFinite(Number(aiTransaction.amount)) ||
-        Number(aiTransaction.amount) <= 0 ||
-        !aiTransaction.name ||
-        !aiTransaction.categoryName
-      ) {
+      if (batch.results.length === 0) {
+        if (batch.firstCreateError) {
+          throw batch.firstCreateError;
+        }
+
         logApiEvent(422, "AI output is not a valid transaction", {
           accountId,
-          output: aiTransaction,
+          output: batch.generated,
+          failed: batch.failed,
         });
 
         return status(
           422,
           errorResponse("AI output is not a valid transaction", {
             code: "INVALID_AI_OUTPUT",
-            output: aiTransaction,
+            output: batch.generated,
+            failed: batch.failed,
+            counts: batch.counts,
           }),
         );
       }
 
-      const result = await createTransaction({
+      logApiEvent(201, "Transactions generated", {
         accountId,
-        type: aiTransaction.type,
-        amount: aiTransaction.amount.toString(),
-        name: aiTransaction.name,
-        categoryName: aiTransaction.categoryName,
-        isAiGenerated: true,
-        reportDate: aiTransaction.reportDate,
+        counts: batch.counts,
+        transactionIds: batch.results.map(
+          (item) => item.transaction.transactionId,
+        ),
+        failed: batch.failed,
       });
 
-      logApiEvent(201, "Transaction generated", {
-        accountId,
-        transactionId: result.transaction.transactionId,
-        walletId: result.wallet?.walletId,
-        categoryId: result.category.categoryId,
-        generated: aiTransaction,
-      });
+      const firstResult = batch.results[0];
+      const legacyFields =
+        batch.generated.length === 1 &&
+        batch.failed.length === 0 &&
+        firstResult
+          ? {
+              generated: firstResult.generated,
+              transaction: firstResult.transaction,
+              category: firstResult.category,
+              wallet: firstResult.wallet,
+            }
+          : {};
 
       return status(
         201,
-        successResponse("Transaction generated", {
-          input: body.text,
-          generated: aiTransaction,
-          ...result,
-        }),
+        successResponse(
+          batch.generated.length === 1 && batch.failed.length === 0
+            ? "Transaction generated"
+            : "Transactions generated",
+          {
+            input: body.text,
+            results: batch.results,
+            failed: batch.failed,
+            counts: batch.counts,
+            ...legacyFields,
+          },
+        ),
       );
     },
     {
@@ -922,57 +1506,73 @@ export const transactionRoutes = new Elysia({ prefix: "/transactions" })
         accountId,
         body.receiptImage,
       );
-      const aiTransaction = await generateTransactionFromReceipt(
+      const generatedReceipt = await generateTransactionsFromReceipt(
         body.receiptImage,
       );
+      const result = await createReceiptTransactions({
+        accountId,
+        receipt: generatedReceipt,
+        receiptImageUrl,
+        walletId: body.walletId,
+        budgetId: body.budgetId,
+        reportDate: body.reportDate,
+      });
 
-      if (
-        aiTransaction.type !== "expense" ||
-        !Number.isFinite(Number(aiTransaction.amount)) ||
-        Number(aiTransaction.amount) <= 0 ||
-        !aiTransaction.name ||
-        !aiTransaction.categoryName
-      ) {
-        logApiEvent(422, "OCR output is not a valid transaction", {
+      if (result.error || result.results.length === 0) {
+        logApiEvent(422, "OCR output has no valid receipt items", {
           accountId,
-          output: aiTransaction,
+          output: generatedReceipt,
+          failed: result.failed,
+          error: result.error,
         });
 
         return status(
           422,
-          errorResponse("OCR output is not a valid transaction", {
+          errorResponse("OCR output has no valid receipt items", {
             code: "INVALID_OCR_OUTPUT",
-            output: aiTransaction,
+            output: generatedReceipt,
+            failed: result.failed,
+            counts: result.counts,
           }),
         );
       }
 
-      const result = await createTransaction({
+      logApiEvent(201, "Receipt OCR transactions created", {
         accountId,
-        type: "expense",
-        amount: aiTransaction.amount.toString(),
-        name: aiTransaction.name,
-        categoryName: aiTransaction.categoryName,
-        walletId: body.walletId,
-        budgetId: body.budgetId,
-        isAiGenerated: true,
-        receiptImageUrl,
-        reportDate: body.reportDate ?? aiTransaction.reportDate,
+        receiptId: result.receiptId,
+        transactionIds: result.results.map(
+          (item) => item.transaction.transactionId,
+        ),
+        walletId: result.wallet?.walletId,
+        counts: result.counts,
+        reconciliation: result.reconciliation,
+        failed: result.failed,
       });
 
-      logApiEvent(201, "Receipt OCR transaction created", {
-        accountId,
-        transactionId: result.transaction.transactionId,
-        walletId: result.wallet?.walletId,
-        categoryId: result.category.categoryId,
-        generated: aiTransaction,
-      });
+      const onlyResult = result.results[0];
+      const legacyFields =
+        result.results.length === 1 &&
+        onlyResult?.line.lineType === "item" &&
+        result.failed.length === 0
+          ? {
+              transaction: onlyResult.transaction,
+              category: onlyResult.category,
+              wallet: result.wallet,
+            }
+          : {};
 
       return status(
         201,
-        successResponse("Receipt OCR transaction created", {
-          generated: aiTransaction,
-          ...result,
+        successResponse("Receipt OCR transactions created", {
+          generated: generatedReceipt,
+          receiptId: result.receiptId,
+          merchant: result.merchant,
+          results: result.results,
+          failed: result.failed,
+          counts: result.counts,
+          reconciliation: result.reconciliation,
+          wallet: result.wallet,
+          ...legacyFields,
         }),
       );
     },

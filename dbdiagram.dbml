@@ -49,6 +49,11 @@ Table transaction {
   name varchar [note: 'Deskripsi transaksi']
   is_ai_generated boolean [default: false, note: 'Menandai apakah ini hasil scan AI']
   receipt_image_url varchar [note: 'Link URL ke foto struk/PDF mutasi']
+  receipt_id uuid [note: 'ID pengelompokan seluruh baris dari satu struk']
+  receipt_merchant varchar
+  receipt_line_type varchar [note: 'item, tax, fee, discount, atau adjustment']
+  quantity decimal
+  unit_price decimal
   report_date timestamp [note: 'Tanggal transaksi sebenarnya terjadi']
   created_at timestamp [default: `now()`]
   updated_at timestamp
