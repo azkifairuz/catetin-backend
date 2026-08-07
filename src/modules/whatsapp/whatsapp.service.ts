@@ -3,12 +3,9 @@ import makeWASocket, {
   downloadMediaMessage,
   useMultiFileAuthState,
 } from "@whiskeysockets/baileys";
-import { desc, eq, inArray } from "drizzle-orm";
 import pino from "pino";
 import qrcode from "qrcode-terminal";
 
-import { db } from "../../db";
-import { account, wallet } from "../../db/schema";
 import { logApiEvent } from "../../lib/log-service";
 import { saveUploadedImage } from "../../lib/upload";
 import {
@@ -20,14 +17,26 @@ import {
   createTransactionsFromText,
   generateFinancialSummaryFromQuestion,
   generateTransactionsFromReceipt,
-} from "../transaction/transaction.routes";
+} from "../transaction/transaction.service";
 import {
   formatBalanceReply,
+  formatRupiah,
   isBalanceQuestion,
 } from "./whatsapp-balance";
+import {
+  formatBudgetList,
+  formatRemainingBudgets,
+  getBudgetPeriodStart,
+} from "./whatsapp-budget";
+import {
+  getWhatsappHelp,
+  parseBudgetCommandInput,
+  parseWhatsappCommand,
+} from "./whatsapp-command";
 import { renderFinancialSummaryImage } from "./summary-image";
 import { UnregisteredReplyLimiter } from "./unregistered-reply-limiter";
 import { resolveWhatsappIdentityJid } from "./whatsapp-identity";
+import { whatsappRepository } from "./whatsapp.repository";
 import { formatReceiptBatchReply } from "./whatsapp-receipt-reply";
 import { formatTransactionBatchReply } from "./whatsapp-transaction-reply";
 
@@ -111,17 +120,9 @@ const getWhatsappAccount = async (remoteJid: string) => {
 
   if (!whatsappNumber) return null;
 
-  const accounts = await db.query.account.findMany({
-    where: inArray(
-      account.whatsappNumber,
-      getWhatsappNumberCandidates(whatsappNumber),
-    ),
-    columns: {
-      accountId: true,
-      whatsappNumber: true,
-      username: true,
-    },
-  });
+  const accounts = await whatsappRepository.findAccounts(
+    getWhatsappNumberCandidates(whatsappNumber),
+  );
 
   return (
     accounts.find((item) => item.whatsappNumber === whatsappNumber) ??
@@ -191,46 +192,7 @@ const registerWhatsappAccount = async (remoteJid: string, text: string) => {
   }
 
   const passwordHash = await Bun.password.hash(command.password);
-  const result = await db.transaction(async (tx) => {
-    const [createdAccount] = await tx
-      .insert(account)
-      .values({
-        username: command.username,
-        whatsappNumber,
-        password: passwordHash,
-      })
-      .returning({
-        accountId: account.accountId,
-        username: account.username,
-        whatsappNumber: account.whatsappNumber,
-      });
-
-    if (!createdAccount) {
-      throw new Error("WA_REGISTER_ACCOUNT_FAILED");
-    }
-
-    const [createdWallet] = await tx
-      .insert(wallet)
-      .values({
-        accountId: createdAccount.accountId,
-        name: "Main Wallet",
-        balance: "0",
-        isPrimary: true,
-      })
-      .returning({
-        walletId: wallet.walletId,
-        name: wallet.name,
-      });
-
-    if (!createdWallet) {
-      throw new Error("WA_REGISTER_WALLET_FAILED");
-    }
-
-    return {
-      account: createdAccount,
-      wallet: createdWallet,
-    };
-  });
+  const result = await whatsappRepository.register({ username: command.username, whatsappNumber, password: passwordHash });
 
   logApiEvent(201, "WhatsApp account registered", {
     module: "whatsapp",
@@ -320,21 +282,73 @@ const handleTextMessage = async (
   text: string,
   logProcess = createProcessLogger("unknown"),
 ): Promise<WhatsappReply> => {
+  const command = parseWhatsappCommand(text);
+  let forceTransaction = false;
+  let forceSummary = false;
+
+  if (command?.name === "help") {
+    return { type: "text", text: getWhatsappHelp() };
+  }
+
+  if (command?.name === "unknown") {
+    return {
+      type: "text",
+      text: `Command /${command.command} tidak dikenal. Ketik /help untuk melihat command yang tersedia.`,
+    };
+  }
+
+  if (command?.name === "budget") {
+    if (!command.argument) {
+      const budgets = await whatsappRepository.listBudgets(accountId);
+      return { type: "text", text: formatBudgetList(budgets) };
+    }
+
+    const input = parseBudgetCommandInput(command.argument);
+    if (!input) {
+      return {
+        type: "text",
+        text: "Format budget belum sesuai.\n\nGunakan: /budget <kategori> <nominal> [periode]\nContoh: /budget Makanan 1000000 bulanan",
+      };
+    }
+
+    const result = await whatsappRepository.saveBudget({ accountId, ...input });
+    return {
+      type: "text",
+      text: `${result.updated ? "Budget diperbarui" : "Budget berhasil dibuat"}.\n${result.category.name}: ${formatRupiah(Number(result.budget?.amount ?? 0))}/${input.period}`,
+    };
+  }
+
+  if (command?.name === "sisa") {
+    const budgets = await whatsappRepository.listBudgets(accountId);
+    if (budgets.length === 0) {
+      return { type: "text", text: formatRemainingBudgets([], []) };
+    }
+    const starts = budgets.map((item) => getBudgetPeriodStart(item.period));
+    const earliestStart = new Date(Math.min(...starts.map((item) => item.getTime())));
+    const expenses = await whatsappRepository.listExpensesSince(accountId, earliestStart);
+    return { type: "text", text: formatRemainingBudgets(budgets, expenses) };
+  }
+
+  if (command?.name === "catat") {
+    if (!command.argument) {
+      return { type: "text", text: "Tulis transaksi setelah /catat.\nContoh: /catat makan siang 25000" };
+    }
+    text = command.argument;
+    forceTransaction = true;
+  }
+
+  if (command?.name === "laporan") {
+    text = command.argument || "laporan keuangan bulan ini";
+    forceSummary = true;
+  }
+
   if (isBalanceQuestion(text)) {
     logProcess(102, "WhatsApp balance lookup started", {
       intent: "balance",
       text,
     });
 
-    const wallets = await db.query.wallet.findMany({
-      where: eq(wallet.accountId, accountId),
-      orderBy: desc(wallet.isPrimary),
-      columns: {
-        name: true,
-        balance: true,
-        isPrimary: true,
-      },
-    });
+    const wallets = await whatsappRepository.listBalances(accountId);
     const totalBalance = wallets.reduce(
       (total, item) => total + Number(item.balance ?? 0),
       0,
@@ -352,7 +366,7 @@ const handleTextMessage = async (
     };
   }
 
-  if (isSummaryQuestion(text)) {
+  if (forceSummary || isSummaryQuestion(text)) {
     logProcess(102, "WhatsApp AI summary started", {
       intent: "summary",
       text,
@@ -384,7 +398,7 @@ const handleTextMessage = async (
     };
   }
 
-  if (isTransactionText(text)) {
+  if (forceTransaction || isTransactionText(text)) {
     logProcess(102, "WhatsApp AI transaction extraction started", {
       intent: "transaction",
       text,

@@ -1,7 +1,7 @@
 import type {
   ReceiptItemFailure,
   ReceiptLineType,
-} from "../transaction/transaction.routes";
+} from "../transaction/transaction.service";
 import { formatRupiah } from "./whatsapp-balance";
 
 type ReceiptReplyResult = {

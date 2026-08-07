@@ -1,7 +1,7 @@
 import type {
   AiTransactionFailure,
   GeminiTransactionOutput,
-} from "../transaction/transaction.routes";
+} from "../transaction/transaction.service";
 import { formatRupiah } from "./whatsapp-balance";
 
 type CreatedTransactionReplyItem = {
