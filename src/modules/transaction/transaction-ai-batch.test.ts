@@ -5,7 +5,7 @@ import {
   getGeneratedTransactionValidationError,
   MAX_AI_TRANSACTIONS,
   parseTransactionsFromTextOutput,
-} from "./transaction.routes";
+} from "./transaction.service";
 
 describe("AI transaction batch parsing", () => {
   test("parses multiple transactions in their original order", () => {

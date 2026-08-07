@@ -4,7 +4,7 @@ import {
   MAX_RECEIPT_ITEMS,
   prepareReceiptLines,
   type GeminiReceiptOutput,
-} from "./transaction.routes";
+} from "./transaction.service";
 
 const receipt = (
   overrides: Partial<GeminiReceiptOutput> = {},

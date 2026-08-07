@@ -1,6 +1,6 @@
 import sharp from "sharp";
 
-import type { FinancialSummaryResult } from "../transaction/transaction.routes";
+import type { FinancialSummaryResult } from "../transaction/transaction.service";
 
 const width = 890;
 const height = 590;
