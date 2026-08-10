@@ -59,8 +59,58 @@ const knownErrors: Record<
   },
 };
 
-const getErrorMessage = (error: unknown) => {
-  return error instanceof Error ? error.message : String(error);
+const frameworkErrors: Record<
+  string,
+  {
+    status: number;
+    message: string;
+    code: string;
+  }
+> = {
+  NOT_FOUND: {
+    status: 404,
+    message: "Route not found",
+    code: "NOT_FOUND",
+  },
+  PARSE: {
+    status: 400,
+    message: "Invalid request body",
+    code: "INVALID_REQUEST_BODY",
+  },
+  VALIDATION: {
+    status: 422,
+    message: "Request validation failed",
+    code: "VALIDATION_ERROR",
+  },
+  INVALID_COOKIE_SIGNATURE: {
+    status: 400,
+    message: "Invalid cookie signature",
+    code: "INVALID_COOKIE_SIGNATURE",
+  },
+  INVALID_FILE_TYPE: {
+    status: 422,
+    message: "Invalid file type",
+    code: "INVALID_FILE_TYPE",
+  },
+};
+
+const getErrorMessage = (error: unknown): string => {
+  if (error && typeof error === "object" && "message" in error) {
+    try {
+      const message = (error as { message?: unknown }).message;
+
+      if (typeof message === "string") return message;
+      if (message !== null && message !== undefined) return String(message);
+    } catch {
+      // Fall through when a custom error exposes an unsafe message getter.
+    }
+  }
+
+  try {
+    return String(error);
+  } catch {
+    return "Unknown error";
+  }
 };
 
 const isDatabaseError = (error: unknown) => {
@@ -79,8 +129,28 @@ export const handleApiError = (
   error: unknown,
   status: ErrorStatus,
   module = "app",
+  frameworkCode?: string | number,
 ) => {
   const message = getErrorMessage(error);
+
+  const frameworkError =
+    typeof frameworkCode === "string"
+      ? frameworkErrors[frameworkCode]
+      : undefined;
+
+  if (frameworkError) {
+    logApiEvent(frameworkError.status, frameworkError.message, {
+      module,
+      error: message,
+    });
+
+    return status(
+      frameworkError.status,
+      errorResponse(frameworkError.message, {
+        code: frameworkError.code,
+      }),
+    );
+  }
 
   if (error instanceof SyntaxError) {
     logApiEvent(502, "Invalid upstream response", {
@@ -96,7 +166,7 @@ export const handleApiError = (
     );
   }
 
-  const knownError = error instanceof Error ? knownErrors[error.message] : null;
+  const knownError = knownErrors[message];
 
   if (knownError) {
     logApiEvent(knownError.status, knownError.message, {

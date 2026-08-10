@@ -5,6 +5,8 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 import pino from "pino";
 import qrcode from "qrcode-terminal";
+import { mkdir, rm } from "node:fs/promises";
+import { parse, resolve, sep } from "node:path";
 
 import { logApiEvent } from "../../lib/log-service";
 import { saveUploadedImage } from "../../lib/upload";
@@ -43,6 +45,7 @@ import { formatTransactionBatchReply } from "./whatsapp-transaction-reply";
 const logger = pino({ level: Bun.env.WA_LOG_LEVEL ?? "silent" });
 const authDirectory = Bun.env.WA_AUTH_DIR ?? "storage/baileys-auth";
 const reconnectDelayMs = Number(Bun.env.WA_RECONNECT_DELAY_MS ?? 5000);
+const logoutTimeoutMs = 5000;
 const configuredUnregisteredReplyLimit = Number(
   Bun.env.WA_UNREGISTERED_REPLY_LIMIT ?? 3,
 );
@@ -56,9 +59,17 @@ const unregisteredReplyLimiter = new UnregisteredReplyLimiter(
 );
 
 let isStartingWhatsappService = false;
+let isResettingWhatsappSession = false;
 let reconnectTimer: Timer | null = null;
 let currentSocket: ReturnType<typeof makeWASocket> | null = null;
 let currentQr: string | null = null;
+let resetSessionPromise: Promise<WhatsappSessionResetResult> | null = null;
+
+export type WhatsappSessionResetResult = {
+  disconnected: boolean;
+  logoutSucceeded: boolean;
+  restarted: boolean;
+};
 
 type WhatsappTextReply = {
   type: "text";
@@ -74,6 +85,94 @@ type WhatsappImageReply = {
 type WhatsappReply = WhatsappTextReply | WhatsappImageReply;
 
 export const getWhatsappQr = () => currentQr;
+
+const resetWhatsappAuthDirectory = async () => {
+  const resolvedAuthDirectory = resolve(authDirectory);
+  const filesystemRoot = parse(resolvedAuthDirectory).root;
+  const workingDirectory = resolve(process.cwd());
+  const isWorkingDirectoryInsideAuthDirectory = workingDirectory.startsWith(
+    `${resolvedAuthDirectory}${sep}`,
+  );
+
+  if (
+    resolvedAuthDirectory === filesystemRoot ||
+    resolvedAuthDirectory === workingDirectory ||
+    isWorkingDirectoryInsideAuthDirectory
+  ) {
+    throw new Error("WA_AUTH_DIRECTORY_UNSAFE");
+  }
+
+  await rm(resolvedAuthDirectory, { recursive: true, force: true });
+  await mkdir(resolvedAuthDirectory, { recursive: true });
+};
+
+export const resetWhatsappSession = async () => {
+  if (resetSessionPromise) return resetSessionPromise;
+
+  resetSessionPromise = (async (): Promise<WhatsappSessionResetResult> => {
+    isResettingWhatsappSession = true;
+    currentQr = null;
+
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+
+    const socket = currentSocket;
+    currentSocket = null;
+    let logoutSucceeded = false;
+
+    if (socket) {
+      const logoutAttempt = socket
+        .logout("WhatsApp session reset from API")
+        .then(() => ({ kind: "success" as const }))
+        .catch((error: unknown) => ({ kind: "error" as const, error }));
+      const logoutResult = await Promise.race([
+        logoutAttempt,
+        Bun.sleep(logoutTimeoutMs).then(() => ({ kind: "timeout" as const })),
+      ]);
+
+      logoutSucceeded = logoutResult.kind === "success";
+
+      if (!logoutSucceeded) {
+        logApiEvent(503, "WhatsApp remote logout did not complete", {
+          module: "whatsapp",
+          reason: logoutResult.kind,
+          error:
+            logoutResult.kind === "error"
+              ? logoutResult.error instanceof Error
+                ? logoutResult.error.message
+                : String(logoutResult.error)
+              : undefined,
+        });
+
+        await socket.end(undefined);
+      }
+    }
+
+    await resetWhatsappAuthDirectory();
+
+    logApiEvent(200, "WhatsApp auth session reset", {
+      module: "whatsapp",
+      disconnected: Boolean(socket),
+      logoutSucceeded,
+    });
+
+    isResettingWhatsappSession = false;
+    await startWhatsappService();
+
+    return {
+      disconnected: Boolean(socket),
+      logoutSucceeded,
+      restarted: true,
+    };
+  })().finally(() => {
+    isResettingWhatsappSession = false;
+    resetSessionPromise = null;
+  });
+
+  return resetSessionPromise;
+};
 
 const createProcessLogger = (
   remoteJid: string,
@@ -587,12 +686,16 @@ export const startWhatsappService = async () => {
     if (update.connection === "close") {
       const statusCode = (update.lastDisconnect?.error as any)?.output
         ?.statusCode;
-      const shouldReconnect = ![
-        DisconnectReason.loggedOut,
-        DisconnectReason.connectionReplaced,
-      ].includes(statusCode);
+      const shouldReconnect =
+        !isResettingWhatsappSession &&
+        ![
+          DisconnectReason.loggedOut,
+          DisconnectReason.connectionReplaced,
+        ].includes(statusCode);
 
-      currentSocket = null;
+      if (currentSocket === socket) {
+        currentSocket = null;
+      }
 
       logApiEvent(shouldReconnect ? 503 : 401, "WhatsApp disconnected", {
         module: "whatsapp",

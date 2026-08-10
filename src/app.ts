@@ -48,4 +48,6 @@ export const app = new Elysia()
   })
   .get("/", () => "Hello Elysia")
   .get("/health", () => ({ status: "ok" }))
-  .onError(({ error, status }) => handleApiError(error, status));
+  .onError(({ code, error, status }) =>
+    handleApiError(error, status, "app", code),
+  );

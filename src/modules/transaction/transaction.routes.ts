@@ -304,4 +304,6 @@ export const transactionRoutes = new Elysia({ prefix: "/transactions" })
       body: ocrReceiptBody,
     },
   )
-  .onError(({ error, status }) => handleApiError(error, status, "transaction"));
+  .onError(({ code, error, status }) =>
+    handleApiError(error, status, "transaction", code),
+  );
